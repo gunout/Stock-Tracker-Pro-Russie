@@ -2,12 +2,17 @@
 Point d'entrée principal de l'application Dashboard MOEX
 """
 import streamlit as st
+import os
+import logging
+from pathlib import Path
 from src.utils.constants import PAGE_CONFIG
 from src.utils.time_utils import setup_timezone
 from src.utils.session import init_session_state
 from src.api.moex_client import MOEXClient
-import logging
-from pathlib import Path
+
+# Créer les dossiers nécessaires s'ils n'existent pas
+os.makedirs('logs', exist_ok=True)
+os.makedirs('cache', exist_ok=True)
 
 # Configuration du logging
 logging.basicConfig(
@@ -48,7 +53,12 @@ def main():
     with st.sidebar:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.image("assets/images/logo.png", width=100)
+            # Vérifier si le logo existe, sinon utiliser du texte
+            logo_path = "assets/images/logo.png"
+            if os.path.exists(logo_path):
+                st.image(logo_path, width=100)
+            else:
+                st.markdown("# 🇷🇺 MOEX")
         
         st.markdown("---")
         st.markdown("## 🇷🇺 Navigation")
@@ -100,7 +110,7 @@ def main():
     st.markdown(
         """
         <div style='text-align: center; color: gray; font-size: 0.8rem;'>
-            🇷🇺 Dashboard MOEX - Données en temps réel via API officielle<br>
+            🇷🇺 Dashboard MOEX - Données via API officielle<br>
             🕐 Tous les horaires en UTC+4 | 
             <a href='https://iss.moex.com/iss/reference/' target='_blank'>Documentation API</a>
         </div>
