@@ -7,7 +7,6 @@ import pandas as pd
 import time
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime, timedelta
-from functools import lru_cache
 import logging
 from .exceptions import MOEXAPIError, MOEXRateLimitError
 from .endpoints import Endpoints, MOEX_BASE_URL
@@ -36,7 +35,7 @@ class MOEXClient:
             'Accept': 'application/json'
         })
         self.last_request_time = 0
-        self.min_request_interval = 0.5  # 500ms minimum entre requêtes
+        self.min_request_interval = 1.0  # 1 seconde minimum entre requêtes
         
     def _rate_limit(self):
         """Applique le rate limiting"""
@@ -95,7 +94,7 @@ class MOEXClient:
     
     def _parse_response(self, data: Dict, block_name: str) -> pd.DataFrame:
         """
-        Parse la réponse MOEX en DataFrame
+        Parse la réponse MOEX en DataFrame - VERSION CORRIGÉE
         
         Args:
             data: Réponse JSON
@@ -105,19 +104,48 @@ class MOEXClient:
             pd.DataFrame: Données formatées
         """
         if block_name not in data:
+            logger.warning(f"Bloc '{block_name}' non trouvé dans la réponse")
             return pd.DataFrame()
         
         block = data[block_name]
         
-        if 'columns' not in block or 'data' not in block:
+        # Vérifier la structure de la réponse
+        if not isinstance(block, dict):
+            logger.error(f"Format de réponse inattendu: {type(block)}")
             return pd.DataFrame()
         
-        columns = [col['name'] for col in block['columns']]
-        rows = block['data']
+        # Vérifier la présence des colonnes et données
+        if 'columns' not in block or 'data' not in block:
+            logger.warning(f"Structure manquante dans le bloc {block_name}")
+            return pd.DataFrame()
         
-        return pd.DataFrame(rows, columns=columns)
+        # Traiter les colonnes - CORRECTION ICI
+        columns_data = block['columns']
+        rows_data = block['data']
+        
+        # Si columns est une liste de dictionnaires
+        if columns_data and isinstance(columns_data[0], dict):
+            columns = [col['name'] for col in columns_data]
+        # Si columns est une liste de chaînes (format alternatif)
+        elif columns_data and isinstance(columns_data[0], str):
+            columns = columns_data
+        else:
+            logger.error(f"Format de colonnes non supporté: {type(columns_data[0]) if columns_data else 'vide'}")
+            return pd.DataFrame()
+        
+        # Créer le DataFrame
+        df = pd.DataFrame(rows_data, columns=columns)
+        
+        # Convertir les colonnes numériques
+        for col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col], errors='ignore')
+            except:
+                pass
+        
+        return df
     
-    @cache(ttl=60)
+    @cache(ttl=3600)  # Cache d'une heure
     def get_securities(self, board: str = "TQBR") -> pd.DataFrame:
         """
         Récupère la liste des actions d'un board
@@ -156,7 +184,7 @@ class MOEXClient:
         
         return result
     
-    @cache(ttl=10)
+    @cache(ttl=10)  # Cache court pour données temps réel
     def get_market_data(self, ticker: str) -> pd.DataFrame:
         """
         Récupère les données de marché en temps réel
@@ -207,6 +235,7 @@ class MOEXClient:
         data = self._make_request(endpoint, params)
         
         df = self._parse_response(data, 'candles')
+        
         if not df.empty and 'begin' in df.columns:
             df['begin'] = pd.to_datetime(df['begin'])
             df.set_index('begin', inplace=True)
@@ -248,39 +277,3 @@ class MOEXClient:
             all_securities['SHORTNAME'].str.contains(query, case=False, na=False)
         )
         return all_securities[mask]
-    
-    def get_top_gainers(self, limit: int = 10) -> pd.DataFrame:
-        """
-        Récupère les plus fortes hausses
-        
-        Args:
-            limit: Nombre de résultats
-            
-        Returns:
-            pd.DataFrame: Top hausses
-        """
-        market_data = self.get_board_securities()
-        if market_data.empty:
-            return pd.DataFrame()
-        
-        if 'CHANGE' in market_data.columns:
-            return market_data.nlargest(limit, 'CHANGE')
-        return pd.DataFrame()
-    
-    def get_top_losers(self, limit: int = 10) -> pd.DataFrame:
-        """
-        Récupère les plus fortes baisses
-        
-        Args:
-            limit: Nombre de résultats
-            
-        Returns:
-            pd.DataFrame: Top baisses
-        """
-        market_data = self.get_board_securities()
-        if market_data.empty:
-            return pd.DataFrame()
-        
-        if 'CHANGE' in market_data.columns:
-            return market_data.nsmallest(limit, 'CHANGE')
-        return pd.DataFrame()
