@@ -1,6 +1,6 @@
 """
 Package des pages Streamlit
-Ce fichier permet d'exporter toutes les pages
+Ce fichier permet d'exporter toutes les pages avec leurs noms exacts
 """
 
 import os
@@ -10,21 +10,19 @@ from pathlib import Path
 # Ajouter le chemin racine au PYTHONPATH
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-try:
-    from . import tableau_de_bord
-    from . import portefeuille
-    from . import alertes
-    from . import indices
-    from . import predictions
-    from . import configuration
-except ImportError as e:
-    print(f"Erreur d'import des pages: {e}")
-
+# Liste de tous les fichiers de pages
 __all__ = [
-    'tableau_de_bord',
-    'portefeuille', 
-    'alertes',
-    'indices',
-    'predictions',
-    'configuration'
+    '1_📈_tableau_de_bord',
+    '2_💰_portefeuille', 
+    '3_🔔_alertes',
+    '4_📊_indices',
+    '5_🤖_predictions',
+    '6_⚙️_configuration'
 ]
+
+# Import de tous les modules
+for module_name in __all__:
+    try:
+        __import__(f'pages.{module_name}')
+    except ImportError as e:
+        print(f"Erreur d'import pour {module_name}: {e}")
