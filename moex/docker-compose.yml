@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  dashboard:
+    build: .
+    container_name: moex-dashboard
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./assets:/app/assets
+    environment:
+      - MOEX_BASE_URL=https://iss.moex.com/iss
+      - CACHE_DIR=/app/cache
+      - LOG_LEVEL=INFO
+      - TZ=Europe/Moscow
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - moex-network
+
+  # Optionnel : pour la base de données si nécessaire
+  # redis:
+  #   image: redis:alpine
+  #   container_name: moex-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - moex-network
+
+networks:
+  moex-network:
+    driver: bridge
+
+volumes:
+  redis-data:

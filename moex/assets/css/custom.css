@@ -1,0 +1,163 @@
+/* Styles personnalisés pour le dashboard MOEX */
+
+/* Police personnalisée */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+* {
+    font-family: 'Roboto', sans-serif;
+}
+
+/* En-têtes */
+.main-header {
+    background: linear-gradient(135deg, #D52B1E 0%, #FFFFFF 50%, #0039A6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-size: 2.5rem;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+/* Cartes métriques */
+.metric-card {
+    background-color: #f8f9fa;
+    border-radius: 10px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+}
+
+.metric-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+/* Badges pour MOEX et RTS */
+.moex-badge {
+    background-color: #D52B1E;
+    color: white;
+    padding: 0.3rem 0.8rem;
+    border-radius: 20px;
+    font-weight: bold;
+    display: inline-block;
+}
+
+.rts-badge {
+    background-color: #0039A6;
+    color: white;
+    padding: 0.3rem 0.8rem;
+    border-radius: 20px;
+    font-weight: bold;
+    display: inline-block;
+}
+
+/* Boîtes d'alerte */
+.alert-box {
+    padding: 1rem;
+    border-radius: 8px;
+    margin: 0.5rem 0;
+    border-left: 4px solid;
+}
+
+.alert-success {
+    background-color: #d4edda;
+    border-color: #28a745;
+    color: #155724;
+}
+
+.alert-warning {
+    background-color: #fff3cd;
+    border-color: #ffc107;
+    color: #856404;
+}
+
+.alert-info {
+    background-color: #d1ecf1;
+    border-color: #17a2b8;
+    color: #0c5460;
+}
+
+.alert-danger {
+    background-color: #f8d7da;
+    border-color: #dc3545;
+    color: #721c24;
+}
+
+/* Badges de fuseau horaire */
+.timezone-badge {
+    background-color: #e3f2fd;
+    border-left: 4px solid #2196f3;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    margin: 1rem 0;
+}
+
+/* Animation de chargement */
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+.loading {
+    animation: pulse 1.5s infinite;
+}
+
+/* Styles pour les tableaux */
+.stDataFrame {
+    font-size: 0.9rem;
+}
+
+.dataframe-positive {
+    color: #0039A6;
+    font-weight: bold;
+}
+
+.dataframe-negative {
+    color: #D52B1E;
+    font-weight: bold;
+}
+
+/* Boutons personnalisés */
+.stButton > button {
+    width: 100%;
+    border-radius: 20px;
+    transition: all 0.3s;
+}
+
+.stButton > button:hover {
+    transform: scale(1.02);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+/* Sidebar */
+.css-1d391kg {
+    background-color: #f8f9fa;
+}
+
+/* Graphiques */
+.js-plotly-plot {
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* Footer */
+.footer {
+    text-align: center;
+    padding: 1rem;
+    color: #6c757d;
+    font-size: 0.8rem;
+    border-top: 1px solid #dee2e6;
+    margin-top: 2rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .main-header {
+        font-size: 1.8rem;
+    }
+    
+    .metric-card {
+        padding: 1rem;
+    }
+}

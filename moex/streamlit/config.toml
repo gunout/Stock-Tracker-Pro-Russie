@@ -1,0 +1,27 @@
+[theme]
+primaryColor = "#D52B1E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif"
+
+[theme.font]
+primaryFont = "sans serif"
+
+[server]
+maxUploadSize = 10
+enableCORS = true
+enableXsrfProtection = true
+maxMessageSize = 200
+port = 8501
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "viewer"
+
+[runner]
+magicEnabled = false
+fastReruns = true

@@ -1,0 +1,146 @@
+{
+    "SBER": {
+        "name": "Sberbank",
+        "isin": "RU0009029540",
+        "sector": "finance",
+        "board": "TQBR"
+    },
+    "GAZP": {
+        "name": "Gazprom",
+        "isin": "RU0007661625",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "LKOH": {
+        "name": "Lukoil",
+        "isin": "RU0009024277",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "ROSN": {
+        "name": "Rosneft",
+        "isin": "RU000A0J2Q06",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "GMKN": {
+        "name": "Norilsk Nickel",
+        "isin": "RU0007288411",
+        "sector": "metals",
+        "board": "TQBR"
+    },
+    "YNDX": {
+        "name": "Yandex",
+        "isin": "NL0009805522",
+        "sector": "tech",
+        "board": "TQBR"
+    },
+    "MTSS": {
+        "name": "MTS",
+        "isin": "RU0007775219",
+        "sector": "telecom",
+        "board": "TQBR"
+    },
+    "NVTK": {
+        "name": "Novatek",
+        "isin": "RU000A0DKVS5",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "MGNT": {
+        "name": "Magnit",
+        "isin": "RU000A0JKQU8",
+        "sector": "retail",
+        "board": "TQBR"
+    },
+    "TATN": {
+        "name": "Tatneft",
+        "isin": "RU0009033591",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "SNGS": {
+        "name": "Surgutneftegas (pref)",
+        "isin": "RU0008926258",
+        "sector": "energy",
+        "board": "TQPI"
+    },
+    "SNGSP": {
+        "name": "Surgutneftegas",
+        "isin": "RU0009029524",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "MOEX": {
+        "name": "Moscow Exchange",
+        "isin": "RU000A0JR4A1",
+        "sector": "finance",
+        "board": "TQBR"
+    },
+    "AFKS": {
+        "name": "Sistema",
+        "isin": "RU000A0DQZE3",
+        "sector": "conglomerate",
+        "board": "TQBR"
+    },
+    "PHOR": {
+        "name": "PhosAgro",
+        "isin": "RU000A0JRKT8",
+        "sector": "chemical",
+        "board": "TQBR"
+    },
+    "PLZL": {
+        "name": "Polymetal",
+        "isin": "RU000A0JNAA8",
+        "sector": "metals",
+        "board": "TQBR"
+    },
+    "ALRS": {
+        "name": "Alrosa",
+        "isin": "RU000A0ZL5P1",
+        "sector": "metals",
+        "board": "TQBR"
+    },
+    "RUAL": {
+        "name": "Rusal",
+        "isin": "RU000A1025V3",
+        "sector": "metals",
+        "board": "TQBR"
+    },
+    "CHMF": {
+        "name": "Severstal",
+        "isin": "RU0009046510",
+        "sector": "metals",
+        "board": "TQBR"
+    },
+    "NLMK": {
+        "name": "NLMK",
+        "isin": "RU0009046452",
+        "sector": "metals",
+        "board": "TQBR"
+    },
+    "HYDR": {
+        "name": "RusHydro",
+        "isin": "RU000A0JPKH7",
+        "sector": "energy",
+        "board": "TQBR"
+    },
+    "AFLT": {
+        "name": "Aeroflot",
+        "isin": "RU0009062285",
+        "sector": "transport",
+        "board": "TQBR"
+    },
+    "FIVE": {
+        "name": "X5 Retail Group",
+        "isin": "NL0006234357",
+        "sector": "retail",
+        "board": "TQBR"
+    },
+    "TCSG": {
+        "name": "TCS Group",
+        "isin": "RU000A101VR6",
+        "sector": "finance",
+        "board": "TQBR"
+    }
+}
