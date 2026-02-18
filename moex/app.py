@@ -1,24 +1,22 @@
 """
-Application principale - Version corrigée
+Application principale
 """
 import streamlit as st
 import sys
 from pathlib import Path
 
-# Configuration de la page
+sys.path.insert(0, str(Path(__file__).parent))
+
 st.set_page_config(
     page_title="MOEX Dashboard",
     page_icon="🇷🇺",
     layout="wide"
 )
 
-# Ajouter le chemin au PYTHONPATH
-sys.path.insert(0, str(Path(__file__).parent))
-
-# Imports des pages (sans chiffres)
+# Import des pages
 try:
     from pages import (
-        page_tableau_de_bord,
+        page_dashboard,  # Nouveau nom
         page_portefeuille,
         page_alertes,
         page_indices,
@@ -27,16 +25,12 @@ try:
     )
     PAGES_OK = True
 except ImportError as e:
-    st.error(f"Erreur d'import des pages: {e}")
+    st.error(f"Erreur d'import: {e}")
     PAGES_OK = False
 
 def main():
-    """Fonction principale"""
-    
-    # Sidebar
     with st.sidebar:
         st.markdown("## 🇷🇺 Navigation")
-        
         page = st.radio(
             "Aller à",
             ["📈 Tableau de bord", 
@@ -44,25 +38,16 @@ def main():
              "🔔 Alertes",
              "📊 Indices",
              "🤖 Prédictions",
-             "⚙️ Configuration"],
-            key="nav"
+             "⚙️ Configuration"]
         )
-        
-        st.markdown("---")
-        
-        if st.button("🔄 Rafraîchir"):
-            st.cache_data.clear()
-            st.rerun()
     
-    # Vérification
     if not PAGES_OK:
-        st.error("Impossible de charger les pages")
+        st.error("Erreur de chargement")
         return
     
-    # Routage
     try:
         if page == "📈 Tableau de bord":
-            page_tableau_de_bord.show()
+            page_dashboard.show()  # Nouveau nom
         elif page == "💰 Portefeuille":
             page_portefeuille.show()
         elif page == "🔔 Alertes":
