@@ -7,10 +7,10 @@ from datetime import datetime, timedelta
 import requests
 import time
 import pytz
-import hashlib
 import json
 import os
-from functools import lru_cache
+import hashlib
+from typing import Optional, Dict, Any
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 # ============================================================================
 
 st.set_page_config(
-    page_title="MOEX - Analyse Technique Multi-Sources",
+    page_title="MOEX - Analyse Technique",
     page_icon="🇷🇺",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -46,189 +46,325 @@ st.markdown("""
         font-weight: bold;
         margin-right: 0.5rem;
     }
-    .source-moex { background-color: #0033A0; color: white; }
-    .source-tradingview { background-color: #2196F3; color: white; }
-    .source-investing { background-color: #FF9800; color: white; }
+    .source-official { background-color: #0033A0; color: white; }
     .source-cache { background-color: #4CAF50; color: white; }
-    .source-simulated { background-color: #9E9E9E; color: white; }
+    .source-simulated { background-color: #FF9800; color: white; }
+    .data-quality {
+        font-size: 0.9rem;
+        padding: 0.5rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    .quality-high { background-color: #d4edda; color: #155724; }
+    .quality-medium { background-color: #fff3cd; color: #856404; }
+    .quality-low { background-color: #f8d7da; color: #721c24; }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# GESTIONNAIRE DE CACHE INTELLIGENT
+# MODÈLE DE DONNÉES UNIFIÉ
 # ============================================================================
 
-class SmartCache:
-    """Cache intelligent avec expiration et persistance"""
+class MOEXData:
+    """Structure de données unifiée pour MOEX"""
     
-    def __init__(self, cache_dir=".cache"):
-        self.cache_dir = cache_dir
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
+    def __init__(self):
+        self.symbol = ""
+        self.company_name = ""
+        self.source = ""
+        self.last_update = None
+        self.dates = []
+        self.open = []
+        self.high = []
+        self.low = []
+        self.close = []
+        self.volume = []
+        self.current_price = 0.0
+        self.change_percent = 0.0
+        self.quality_score = 0  # 0-100
     
-    def _get_cache_key(self, symbol, period, interval):
-        """Génère une clé de cache unique"""
-        key_str = f"{symbol}_{period}_{interval}_{datetime.now().strftime('%Y%m%d_%H')}"
-        return hashlib.md5(key_str.encode()).hexdigest()
-    
-    def get(self, symbol, period, interval, max_age=3600):
-        """Récupère les données du cache si elles sont encore valides"""
-        cache_key = self._get_cache_key(symbol, period, interval)
-        cache_file = os.path.join(self.cache_dir, f"{cache_key}.json")
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convertit en DataFrame pandas"""
+        if not self.dates:
+            return pd.DataFrame()
         
-        if os.path.exists(cache_file):
-            file_age = time.time() - os.path.getmtime(cache_file)
-            if file_age < max_age:
-                try:
-                    with open(cache_file, 'r') as f:
-                        return json.load(f)
-                except:
-                    pass
-        return None
-    
-    def set(self, symbol, period, interval, data):
-        """Sauvegarde les données dans le cache"""
-        cache_key = self._get_cache_key(symbol, period, interval)
-        cache_file = os.path.join(self.cache_dir, f"{cache_key}.json")
+        df = pd.DataFrame({
+            'open': self.open,
+            'high': self.high,
+            'low': self.low,
+            'close': self.close,
+            'volume': self.volume
+        }, index=pd.to_datetime(self.dates))
         
-        try:
-            with open(cache_file, 'w') as f:
-                json.dump(data, f)
-        except:
-            pass
+        return df
+    
+    def is_valid(self) -> bool:
+        """Vérifie si les données sont valides"""
+        return (len(self.dates) > 0 and 
+                len(self.open) > 0 and 
+                len(self.close) > 0)
+    
+    def get_quality_score(self) -> int:
+        """Calcule un score de qualité des données"""
+        score = 100
+        
+        # Pénalités basées sur la source
+        source_penalties = {
+            'MOEX Officiel': 0,
+            'Cache': 10,
+            'Simulé': 50
+        }
+        score -= source_penalties.get(self.source, 30)
+        
+        # Vérifier la complétude
+        if len(self.dates) < 20:
+            score -= 30
+        
+        # Vérifier la fraîcheur
+        if self.last_update:
+            age_hours = (datetime.now() - self.last_update).total_seconds() / 3600
+            if age_hours > 24:
+                score -= 20
+            elif age_hours > 6:
+                score -= 10
+        
+        return max(0, min(100, score))
 
 # ============================================================================
-# SOURCES DE DONNÉES MULTIPLES POUR MOEX
+# COLLECTEUR DE DONNÉES MOEX
 # ============================================================================
 
-class MOEXMultiSourceProvider:
-    """Fournisseur avec plusieurs sources de données"""
+class MOEXDataCollector:
+    """Collecte les données de multiples sources et les unifie"""
     
     # Mapping des symboles
     SYMBOLS = {
-        'SBER': {'name': 'Sberbank', 'isin': 'RU0009029540'},
-        'GAZP': {'name': 'Gazprom', 'isin': 'RU0007661625'},
-        'LKOH': {'name': 'Lukoil', 'isin': 'RU0009024277'},
-        'ROSN': {'name': 'Rosneft', 'isin': 'RU000A0J2Q06'},
-        'NVTK': {'name': 'Novatek', 'isin': 'RU000A0DKV59'},
-        'GMKN': {'name': 'Norilsk Nickel', 'isin': 'RU0007288411'},
-        'YNDX': {'name': 'Yandex', 'isin': 'NL0009805522'},
+        'SBER': {
+            'name': 'Sberbank',
+            'isin': 'RU0009029540',
+            'moex_id': 'SBER',
+            'figi': 'BBG004730N88'
+        },
+        'GAZP': {
+            'name': 'Gazprom',
+            'isin': 'RU0007661625',
+            'moex_id': 'GAZP',
+            'figi': 'BBG004730RP0'
+        },
+        'LKOH': {
+            'name': 'Lukoil',
+            'isin': 'RU0009024277',
+            'moex_id': 'LKOH',
+            'figi': 'BBG004731032'
+        },
+        'ROSN': {
+            'name': 'Rosneft',
+            'isin': 'RU000A0J2Q06',
+            'moex_id': 'ROSN',
+            'figi': 'BBG0047315D0'
+        },
+        'NVTK': {
+            'name': 'Novatek',
+            'isin': 'RU000A0DKV59',
+            'moex_id': 'NVTK',
+            'figi': 'BBG004Q0X2S7'
+        },
+        'GMKN': {
+            'name': 'Norilsk Nickel',
+            'isin': 'RU0007288411',
+            'moex_id': 'GMKN',
+            'figi': 'BBG0047315T0'
+        },
+        'YNDX': {
+            'name': 'Yandex',
+            'isin': 'NL0009805522',
+            'moex_id': 'YNDX',
+            'figi': 'BBG006L6B6V6'
+        }
     }
     
     def __init__(self):
-        self.cache = SmartCache()
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
         })
+        self.cache_dir = ".moex_cache"
+        os.makedirs(self.cache_dir, exist_ok=True)
     
-    def get_data_moex_iss(self, symbol):
-        """Source 1: API officielle MOEX ISS"""
-        try:
-            # Récupérer l'ISIN
-            isin = self.SYMBOLS.get(symbol, {}).get('isin', '')
-            if not isin:
-                return None
-            
-            # Requête à l'API MOEX
-            url = f"https://iss.moex.com/iss/securities/{isin}.json"
-            response = self.session.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                return {'source': 'moex', 'data': data}
-        except:
-            pass
-        return None
+    def _get_cache_key(self, symbol: str) -> str:
+        """Génère une clé de cache"""
+        date_str = datetime.now().strftime('%Y%m%d_%H')
+        key = f"{symbol}_{date_str}"
+        return hashlib.md5(key.encode()).hexdigest()
     
-    def get_data_tradingview(self, symbol):
-        """Source 2: TradingView via API"""
+    def _save_to_cache(self, symbol: str, data: MOEXData):
+        """Sauvegarde les données dans le cache"""
+        cache_file = os.path.join(self.cache_dir, f"{self._get_cache_key(symbol)}.json")
+        
+        cache_data = {
+            'symbol': data.symbol,
+            'company_name': data.company_name,
+            'source': data.source,
+            'last_update': data.last_update.isoformat() if data.last_update else None,
+            'dates': [d.isoformat() if hasattr(d, 'isoformat') else d for d in data.dates],
+            'open': data.open,
+            'high': data.high,
+            'low': data.low,
+            'close': data.close,
+            'volume': data.volume,
+            'current_price': data.current_price,
+            'change_percent': data.change_percent
+        }
+        
         try:
-            url = "https://scanner.tradingview.com/russia/scan"
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+        except Exception as e:
+            print(f"Erreur cache: {e}")
+    
+    def _load_from_cache(self, symbol: str) -> Optional[MOEXData]:
+        """Charge les données du cache si disponibles"""
+        cache_file = os.path.join(self.cache_dir, f"{self._get_cache_key(symbol)}.json")
+        
+        if not os.path.exists(cache_file):
+            return None
+        
+        # Vérifier l'âge du cache
+        file_age = time.time() - os.path.getmtime(cache_file)
+        if file_age > 3600:  # Plus d'une heure
+            return None
+        
+        try:
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
             
-            payload = {
-                "symbols": {
-                    "tickers": [f"MOEX:{symbol}"],
-                    "query": {"types": []}
-                },
-                "columns": [
-                    "close", "volume", "high", "low", "open",
-                    "change", "relative_volume", "RSI", "MACD.macd"
-                ]
+            data = MOEXData()
+            data.symbol = cache_data.get('symbol', symbol)
+            data.company_name = cache_data.get('company_name', '')
+            data.source = cache_data.get('source', 'Cache')
+            data.last_update = datetime.fromisoformat(cache_data['last_update']) if cache_data.get('last_update') else None
+            data.dates = [datetime.fromisoformat(d) for d in cache_data.get('dates', [])]
+            data.open = cache_data.get('open', [])
+            data.high = cache_data.get('high', [])
+            data.low = cache_data.get('low', [])
+            data.close = cache_data.get('close', [])
+            data.volume = cache_data.get('volume', [])
+            data.current_price = cache_data.get('current_price', 0)
+            data.change_percent = cache_data.get('change_percent', 0)
+            
+            return data
+        except Exception:
+            return None
+    
+    def collect_from_moex(self, symbol: str) -> Optional[MOEXData]:
+        """Collecte les données depuis l'API MOEX"""
+        try:
+            # Utiliser l'API ISS MOEX
+            moex_id = self.SYMBOLS.get(symbol, {}).get('moex_id', symbol)
+            
+            # Récupérer les données historiques
+            url = f"https://iss.moex.com/iss/history/engines/stock/markets/shares/boards/tqbr/securities/{moex_id}.json"
+            params = {
+                'from': (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'),
+                'till': datetime.now().strftime('%Y-%m-%d'),
+                'start': 0,
+                'limit': 100
             }
             
-            response = self.session.post(url, json=payload, timeout=10)
+            response = self.session.get(url, params=params, timeout=10)
             
-            if response.status_code == 200:
-                data = response.json()
-                return {'source': 'tradingview', 'data': data}
-        except:
-            pass
-        return None
-    
-    def get_data_investing(self, symbol):
-        """Source 3: Investing.com"""
-        try:
-            # Mapping des paires Investing
-            investing_ids = {
-                'SBER': '8830',
-                'GAZP': '8833',
-                'LKOH': '8835',
-            }
-            
-            pair_id = investing_ids.get(symbol, '')
-            if not pair_id:
+            if response.status_code != 200:
                 return None
             
-            url = f"https://api.investing.com/api/financialdata/{pair_id}/historical"
-            response = self.session.get(url, timeout=10)
+            data = response.json()
             
-            if response.status_code == 200:
-                data = response.json()
-                return {'source': 'investing', 'data': data}
-        except:
-            pass
-        return None
+            # Vérifier la structure des données
+            if 'history' not in data or 'data' not in data['history']:
+                return None
+            
+            # Créer l'objet de données
+            moex_data = MOEXData()
+            moex_data.symbol = symbol
+            moex_data.company_name = self.SYMBOLS.get(symbol, {}).get('name', symbol)
+            moex_data.source = 'MOEX Officiel'
+            moex_data.last_update = datetime.now()
+            
+            # Parcourir les données
+            columns = data['history']['columns']
+            date_idx = columns.index('TRADEDATE')
+            open_idx = columns.index('OPEN') if 'OPEN' in columns else None
+            high_idx = columns.index('HIGH') if 'HIGH' in columns else None
+            low_idx = columns.index('LOW') if 'LOW' in columns else None
+            close_idx = columns.index('CLOSE') if 'CLOSE' in columns else None
+            volume_idx = columns.index('VOLUME') if 'VOLUME' in columns else None
+            
+            for row in data['history']['data']:
+                try:
+                    date = datetime.strptime(row[date_idx], '%Y-%m-%d')
+                    
+                    moex_data.dates.append(date)
+                    moex_data.open.append(float(row[open_idx]) if open_idx is not None and row[open_idx] else 0)
+                    moex_data.high.append(float(row[high_idx]) if high_idx is not None and row[high_idx] else 0)
+                    moex_data.low.append(float(row[low_idx]) if low_idx is not None and row[low_idx] else 0)
+                    moex_data.close.append(float(row[close_idx]) if close_idx is not None and row[close_idx] else 0)
+                    moex_data.volume.append(float(row[volume_idx]) if volume_idx is not None and row[volume_idx] else 0)
+                except (ValueError, IndexError):
+                    continue
+            
+            if moex_data.close:
+                moex_data.current_price = moex_data.close[-1]
+                if len(moex_data.close) > 1:
+                    moex_data.change_percent = ((moex_data.close[-1] / moex_data.close[-2]) - 1) * 100
+            
+            return moex_data
+            
+        except Exception as e:
+            print(f"Erreur MOEX: {e}")
+            return None
     
-    def get_data_yahoo_alternative(self, symbol):
-        """Source 4: Yahoo Finance via API alternative"""
+    def collect_from_yahoo(self, symbol: str) -> Optional[MOEXData]:
+        """Collecte depuis Yahoo Finance"""
         try:
-            # Utiliser yfinance avec rate limiting
             import yfinance as yf
             
-            # Attendre entre les requêtes
+            # Attendre pour éviter rate limiting
             time.sleep(2)
             
             ticker = yf.Ticker(f"{symbol}.ME")
-            hist = ticker.history(period="1mo", interval="1d")
+            hist = ticker.history(period="3mo", interval="1d")
             
-            if not hist.empty:
-                # Convertir en format standard
-                data = []
-                for date, row in hist.iterrows():
-                    data.append({
-                        'date': date.strftime('%Y-%m-%d'),
-                        'open': float(row['Open']),
-                        'high': float(row['High']),
-                        'low': float(row['Low']),
-                        'close': float(row['Close']),
-                        'volume': int(row['Volume'])
-                    })
-                
-                return {
-                    'source': 'yahoo',
-                    'data': data,
-                    'current': {
-                        'price': float(hist['Close'].iloc[-1]),
-                        'change': float(((hist['Close'].iloc[-1] / hist['Close'].iloc[-2]) - 1) * 100)
-                    }
-                }
-        except:
-            pass
-        return None
+            if hist.empty:
+                return None
+            
+            moex_data = MOEXData()
+            moex_data.symbol = symbol
+            moex_data.company_name = self.SYMBOLS.get(symbol, {}).get('name', symbol)
+            moex_data.source = 'Yahoo Finance'
+            moex_data.last_update = datetime.now()
+            
+            # Convertir les données
+            for date, row in hist.iterrows():
+                moex_data.dates.append(date)
+                moex_data.open.append(float(row['Open']))
+                moex_data.high.append(float(row['High']))
+                moex_data.low.append(float(row['Low']))
+                moex_data.close.append(float(row['Close']))
+                moex_data.volume.append(int(row['Volume']))
+            
+            moex_data.current_price = moex_data.close[-1] if moex_data.close else 0
+            if len(moex_data.close) > 1:
+                moex_data.change_percent = ((moex_data.close[-1] / moex_data.close[-2]) - 1) * 100
+            
+            return moex_data
+            
+        except Exception as e:
+            print(f"Erreur Yahoo: {e}")
+            return None
     
-    def generate_simulated_data(self, symbol, days=30):
-        """Source 5: Données simulées réalistes (fallback)"""
+    def generate_simulated_data(self, symbol: str) -> MOEXData:
+        """Génère des données simulées réalistes"""
+        
         base_prices = {
             'SBER': 280.50,
             'GAZP': 165.30,
@@ -241,95 +377,84 @@ class MOEXMultiSourceProvider:
         
         base_price = base_prices.get(symbol, 1000.00)
         
-        # Générer des données réalistes
-        dates = []
-        data = []
+        moex_data = MOEXData()
+        moex_data.symbol = symbol
+        moex_data.company_name = self.SYMBOLS.get(symbol, {}).get('name', symbol)
+        moex_data.source = 'Simulé'
+        moex_data.last_update = datetime.now()
         
+        # Générer 90 jours de données
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
+        start_date = end_date - timedelta(days=90)
         
         current_date = start_date
         price = base_price
+        volatility = 0.02
         
         while current_date <= end_date:
             if current_date.weekday() < 5:  # Jours de semaine
-                # Variation réaliste
-                change = np.random.normal(0.0005, 0.02)
-                price = price * (1 + change)
+                # Mouvement de prix réaliste
+                drift = 0.0002  # Légère tendance haussière
+                shock = np.random.normal(0, volatility)
+                price = price * np.exp(drift + shock)
                 
-                high = price * (1 + abs(np.random.normal(0, 0.01)))
-                low = price * (1 - abs(np.random.normal(0, 0.01)))
+                # Générer OHLC
+                high_mult = 1 + abs(np.random.normal(0, 0.005))
+                low_mult = 1 - abs(np.random.normal(0, 0.005))
                 
-                dates.append(current_date.strftime('%Y-%m-%d'))
-                data.append({
-                    'date': current_date.strftime('%Y-%m-%d'),
-                    'open': float(price * 0.999),
-                    'high': float(high),
-                    'low': float(low),
-                    'close': float(price),
-                    'volume': int(np.random.randint(100000, 10000000))
-                })
+                moex_data.dates.append(current_date)
+                moex_data.open.append(float(price * 0.998))
+                moex_data.high.append(float(price * high_mult))
+                moex_data.low.append(float(price * low_mult))
+                moex_data.close.append(float(price))
+                moex_data.volume.append(int(np.random.uniform(100000, 5000000)))
             
             current_date += timedelta(days=1)
         
-        return {
-            'source': 'simulated',
-            'data': data,
-            'current': {
-                'price': float(price),
-                'change': float(np.random.uniform(-3, 3))
-            }
-        }
+        moex_data.current_price = moex_data.close[-1] if moex_data.close else base_price
+        moex_data.change_percent = np.random.uniform(-2, 2)
+        
+        return moex_data
     
-    def get_best_available_data(self, symbol, period="1mo", interval="1d"):
-        """Tente toutes les sources dans l'ordre et retourne la meilleure disponible"""
+    def get_best_data(self, symbol: str, use_cache: bool = True) -> MOEXData:
+        """Récupère les meilleures données disponibles"""
         
-        # Vérifier le cache d'abord
-        cached = self.cache.get(symbol, period, interval)
-        if cached:
-            cached['source'] = 'cache'
-            return cached
+        # Essayer le cache d'abord
+        if use_cache:
+            cached = self._load_from_cache(symbol)
+            if cached and cached.is_valid():
+                cached.source = "Cache"
+                return cached
         
-        # Liste des sources dans l'ordre de préférence
-        sources = [
-            ('MOEX ISS', self.get_data_moex_iss),
-            ('TradingView', self.get_data_tradingview),
-            ('Investing.com', self.get_data_investing),
-            ('Yahoo (ralenti)', self.get_data_yahoo_alternative),
-        ]
+        # Essayer MOEX officiel
+        st.info("🔄 Tentative: MOEX Officiel...")
+        data = self.collect_from_moex(symbol)
+        if data and data.is_valid():
+            self._save_to_cache(symbol, data)
+            return data
         
-        for source_name, source_func in sources:
-            try:
-                st.info(f"🔄 Tentative: {source_name}...")
-                result = source_func(symbol)
-                
-                if result and result.get('data'):
-                    # Sauvegarder dans le cache
-                    self.cache.set(symbol, period, interval, result)
-                    
-                    # Ajouter la source pour affichage
-                    result['source_display'] = source_name
-                    return result
-                
-            except Exception as e:
-                continue
+        # Essayer Yahoo
+        st.info("🔄 Tentative: Yahoo Finance...")
+        data = self.collect_from_yahoo(symbol)
+        if data and data.is_valid():
+            self._save_to_cache(symbol, data)
+            return data
         
-        # Fallback: données simulées
-        st.warning("⚠️ Utilisation de données simulées (aucune source en temps réel disponible)")
-        simulated = self.generate_simulated_data(symbol)
-        simulated['source_display'] = 'Simulé'
-        return simulated
+        # Fallback aux données simulées
+        st.warning("⚠️ Utilisation de données simulées (aucune source disponible)")
+        data = self.generate_simulated_data(symbol)
+        return data
 
 # ============================================================================
 # INDICATEURS TECHNIQUES
 # ============================================================================
 
-class TechnicalIndicators:
-    """Calcul des indicateurs techniques"""
+class TechnicalAnalyzer:
+    """Analyse technique"""
     
     @staticmethod
-    def calculate_rsi(prices, period=14):
-        """RSI"""
+    def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+        """Calcule le RSI"""
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -338,8 +463,8 @@ class TechnicalIndicators:
         return rsi
     
     @staticmethod
-    def calculate_macd(prices, fast=12, slow=26, signal=9):
-        """MACD"""
+    def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+        """Calcule le MACD"""
         exp1 = prices.ewm(span=fast, adjust=False).mean()
         exp2 = prices.ewm(span=slow, adjust=False).mean()
         macd = exp1 - exp2
@@ -348,24 +473,32 @@ class TechnicalIndicators:
         return macd, signal_line, histogram
     
     @staticmethod
-    def calculate_bollinger(prices, period=20, std_dev=2):
-        """Bollinger Bands"""
+    def calculate_bollinger(prices: pd.Series, period: int = 20, std_dev: int = 2):
+        """Calcule les bandes de Bollinger"""
         sma = prices.rolling(window=period).mean()
         std = prices.rolling(window=period).std()
         upper = sma + (std * std_dev)
         lower = sma - (std * std_dev)
         return upper, sma, lower
+    
+    @staticmethod
+    def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+        """Calcule le VWAP"""
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        vwap = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+        return vwap
 
 # ============================================================================
 # INTERFACE PRINCIPALE
 # ============================================================================
 
 def main():
-    st.markdown("<div class='main-header'>🇷🇺 MOEX - DONNÉES MULTI-SOURCES INTELLIGENTES</div>", 
+    st.markdown("<div class='main-header'>🇷🇺 MOEX - DONNÉES BOURSIÈRES RUSSES</div>", 
                 unsafe_allow_html=True)
     
     # Initialisation
-    provider = MOEXMultiSourceProvider()
+    collector = MOEXDataCollector()
+    analyzer = TechnicalAnalyzer()
     
     # Sidebar
     with st.sidebar:
@@ -374,80 +507,75 @@ def main():
         # Sélection du symbole
         symbol = st.selectbox(
             "Symbole",
-            options=list(MOEXMultiSourceProvider.SYMBOLS.keys()),
-            format_func=lambda x: f"{x} - {MOEXMultiSourceProvider.SYMBOLS[x]['name']}"
+            options=list(MOEXDataCollector.SYMBOLS.keys()),
+            format_func=lambda x: f"{x} - {MOEXDataCollector.SYMBOLS[x]['name']}"
         )
         
-        # Option pour vider le cache
-        if st.button("🗑️ Vider le cache"):
-            cache_dir = ".cache"
-            if os.path.exists(cache_dir):
-                for f in os.listdir(cache_dir):
-                    os.remove(os.path.join(cache_dir, f))
-            st.success("Cache vidé !")
+        # Option de cache
+        use_cache = st.checkbox("Utiliser le cache", value=True)
+        
+        # Bouton de rafraîchissement
+        if st.button("🔄 Forcer le rafraîchissement"):
+            use_cache = False
             st.rerun()
         
         st.markdown("---")
-        st.markdown("**Sources disponibles:**")
-        st.markdown("• 🏦 MOEX ISS (officiel)")
-        st.markdown("• 📊 TradingView")
-        st.markdown("• 💹 Investing.com")
-        st.markdown("• ⏳ Yahoo Finance (limité)")
-        st.markdown("• 🎲 Simulé (fallback)")
+        st.markdown("**Sources de données:**")
+        st.markdown("1. 🇷🇺 MOEX Officiel (prioritaire)")
+        st.markdown("2. 📈 Yahoo Finance")
+        st.markdown("3. 💾 Cache local")
+        st.markdown("4. 🎲 Simulation (fallback)")
     
-    # Chargement des données
-    with st.spinner("Recherche de la meilleure source de données..."):
-        data = provider.get_best_available_data(symbol)
+    # Récupération des données
+    with st.spinner("Récupération des données..."):
+        data = collector.get_best_data(symbol, use_cache=use_cache)
     
-    if not data:
-        st.error("Impossible de charger les données. Veuillez réessayer plus tard.")
+    if not data or not data.is_valid():
+        st.error("Impossible de récupérer les données")
         return
     
-    # Afficher la source utilisée
-    source_display = data.get('source_display', data.get('source', 'Inconnue'))
-    source_class = {
-        'MOEX ISS': 'source-moex',
-        'TradingView': 'source-tradingview',
-        'Investing.com': 'source-investing',
-        'cache': 'source-cache',
-        'Simulé': 'source-simulated'
-    }.get(source_display, 'source-simulated')
+    # Score de qualité
+    quality_score = data.get_quality_score()
+    quality_class = "quality-high" if quality_score >= 70 else "quality-medium" if quality_score >= 40 else "quality-low"
     
-    st.markdown(f"""
-    <div style="margin-bottom: 1rem;">
-        <span class="source-badge {source_class}">📡 Source: {source_display}</span>
-        <span style="color: gray; font-size: 0.9rem;">Dernière mise à jour: {datetime.now().strftime('%H:%M:%S')}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    # Affichage de la source et qualité
+    col_source1, col_source2 = st.columns([2, 1])
     
-    # Traitement des données selon le format
-    if 'data' in data and isinstance(data['data'], list):
-        # Format standard
-        df = pd.DataFrame(data['data'])
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date')
-        
-        current_price = data.get('current', {}).get('price', df['close'].iloc[-1])
-        current_change = data.get('current', {}).get('change', 0)
-    else:
-        st.warning("Format de données non supporté")
+    with col_source1:
+        source_class = f"source-{data.source.lower().split()[0]}" if data.source.lower() in ['moex', 'cache', 'simulé'] else "source-simulated"
+        st.markdown(f"""
+        <div>
+            <span class="source-badge {source_class}">📡 Source: {data.source}</span>
+            <span style="color: gray;">Dernière mise à jour: {data.last_update.strftime('%H:%M:%S') if data.last_update else 'N/A'}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col_source2:
+        st.markdown(f"<div class='data-quality {quality_class}'>Qualité: {quality_score}/100</div>", 
+                   unsafe_allow_html=True)
+    
+    # Convertir en DataFrame pour l'analyse
+    df = data.to_dataframe()
+    
+    if df.empty:
+        st.error("Données insuffisantes pour l'analyse")
         return
     
-    # Affichage des métriques
+    # Métriques principales
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric(
-            f"{symbol} - {MOEXMultiSourceProvider.SYMBOLS[symbol]['name']}",
-            f"₽{current_price:,.2f}",
-            f"{current_change:+.2f}%"
+            f"{symbol} - {data.company_name}",
+            f"₽{data.current_price:,.2f}",
+            f"{data.change_percent:+.2f}%"
         )
     
     with col2:
-        st.metric("Plus haut", f"₽{df['high'].max():,.2f}")
+        st.metric("Plus haut (période)", f"₽{df['high'].max():,.2f}")
     
     with col3:
-        st.metric("Plus bas", f"₽{df['low'].min():,.2f}")
+        st.metric("Plus bas (période)", f"₽{df['low'].min():,.2f}")
     
     with col4:
         st.metric("Volume total", f"{df['volume'].sum():,.0f}")
@@ -459,8 +587,7 @@ def main():
         rows=3, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        row_heights=[0.5, 0.2, 0.3],
-        subplot_titles=(f"{symbol} - Chandeliers", "Volume", "RSI")
+        row_heights=[0.5, 0.2, 0.3]
     )
     
     # Chandeliers
@@ -476,7 +603,7 @@ def main():
     ), row=1, col=1)
     
     # Bollinger Bands
-    upper, middle, lower = TechnicalIndicators.calculate_bollinger(df['close'])
+    upper, middle, lower = analyzer.calculate_bollinger(df['close'])
     
     fig.add_trace(go.Scatter(
         x=df.index,
@@ -490,7 +617,7 @@ def main():
         x=df.index,
         y=middle,
         name='MA20',
-        line=dict(color='orange')
+        line=dict(color='orange', width=1)
     ), row=1, col=1)
     
     fig.add_trace(go.Scatter(
@@ -510,55 +637,73 @@ def main():
         x=df.index,
         y=df['volume'],
         name='Volume',
-        marker_color=colors
+        marker_color=colors,
+        showlegend=False
     ), row=2, col=1)
     
     # RSI
-    rsi = TechnicalIndicators.calculate_rsi(df['close'])
+    rsi = analyzer.calculate_rsi(df['close'])
     
     fig.add_trace(go.Scatter(
         x=df.index,
         y=rsi,
         name='RSI',
-        line=dict(color='purple')
+        line=dict(color='purple', width=1)
     ), row=3, col=1)
     
+    # Lignes de référence RSI
     fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=3, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=3, col=1)
+    fig.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.3, row=3, col=1)
     
+    # Mise en page
     fig.update_layout(
+        title=f"{symbol} - Analyse technique",
+        xaxis_title="Date",
+        yaxis_title="Prix (RUB)",
         height=800,
         template='plotly_white',
-        showlegend=True,
-        hovermode='x unified'
+        hovermode='x unified',
+        showlegend=True
     )
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Informations sur le taux de limitation
-    if source_display == 'Simulé':
+    # Statistiques
+    with st.expander("📊 Statistiques détaillées"):
+        col_s1, col_s2, col_s3 = st.columns(3)
+        
+        returns = df['close'].pct_change().dropna()
+        
+        with col_s1:
+            st.metric("Moyenne (période)", f"₽{df['close'].mean():,.2f}")
+            st.metric("Volatilité", f"{returns.std() * 100:.2f}%")
+        
+        with col_s2:
+            st.metric("Médiane", f"₽{df['close'].median():,.2f}")
+            st.metric("Skewness", f"{returns.skew():.3f}")
+        
+        with col_s3:
+            st.metric("Ecart-type", f"₽{df['close'].std():,.2f}")
+            st.metric("Kurtosis", f"{returns.kurtosis():.3f}")
+        
+        # Afficher les dernières données
+        st.subheader("Dernières transactions")
+        st.dataframe(df.tail(10))
+    
+    # Note sur la qualité des données
+    if data.source == "Simulé":
         st.warning("""
-        ⚠️ **Données simulées utilisées**
+        ⚠️ **Données simulées**
         
+        Les données en temps réel ne sont pas disponibles actuellement. 
         Causes possibles:
-        - Limitation de taux (rate limiting) des API
-        - Indisponibilité temporaire des sources
-        - Sanctions affectant l'accès aux données
+        - API MOEX temporairement indisponible
+        - Limitations de taux
+        - Restrictions d'accès
         
-        **Solutions:**
-        1. Attendez quelques minutes et réessayez
-        2. Utilisez le bouton "Vider le cache"
-        3. Réessayez plus tard
+        Réessayez dans quelques minutes.
         """)
-    
-    # Bouton d'actualisation
-    if st.button("🔄 Actualiser maintenant"):
-        st.cache_data.clear()
-        provider.cache = SmartCache()  # Nouveau cache
-        st.rerun()
-    
-    # Timer pour éviter le rate limiting
-    time.sleep(2)
 
 if __name__ == "__main__":
     main()
