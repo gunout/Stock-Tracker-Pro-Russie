@@ -13,7 +13,7 @@ def get_moex_data(ticker):
     Récupère les données en temps réel depuis l'API MOEX
     """
     try:
-        # URL pour les données de marché en temps réel
+        # URL pour les données de marché
         url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json"
         
         params = {
@@ -23,28 +23,30 @@ def get_moex_data(ticker):
         }
         
         response = requests.get(url, params=params, timeout=10)
-        data = response.json()
         
-        if 'marketdata' in data and 'data' in data['marketdata']:
-            marketdata = data['marketdata']
-            columns = marketdata['columns']
-            values = marketdata['data'][0] if marketdata['data'] else []
+        if response.status_code == 200:
+            data = response.json()
             
-            # Créer un dictionnaire avec les données
-            result = {}
-            for i, col in enumerate(columns):
-                if i < len(values):
-                    result[col] = values[i]
-            
-            return result
+            if 'marketdata' in data and 'data' in data['marketdata']:
+                marketdata = data['marketdata']
+                columns = marketdata['columns']
+                values = marketdata['data'][0] if marketdata['data'] else []
+                
+                # Créer un dictionnaire avec les données
+                result = {}
+                for i, col in enumerate(columns):
+                    if i < len(values):
+                        result[col] = values[i]
+                
+                return result, None
     except Exception as e:
-        st.warning(f"Erreur API pour {ticker}: {e}")
+        return None, str(e)
     
-    return None
+    return None, "Aucune donnée"
 
 def get_moex_history(ticker, days=30):
     """
-    Récupère l'historique des prix depuis l'API MOEX
+    Récupère l'historique des prix
     """
     try:
         url = f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json"
@@ -61,51 +63,65 @@ def get_moex_history(ticker, days=30):
         }
         
         response = requests.get(url, params=params, timeout=10)
-        data = response.json()
         
-        if 'candles' in data and 'data' in data['candles']:
-            candles = data['candles']
+        if response.status_code == 200:
+            data = response.json()
             
-            # Extraire les colonnes
-            if 'columns' in candles:
+            if 'candles' in data and 'data' in data['candles']:
+                candles = data['candles']
                 columns = candles['columns']
-                if columns and isinstance(columns[0], dict):
-                    columns = [col['name'] for col in columns]
                 
+                # Créer DataFrame
                 df = pd.DataFrame(candles['data'], columns=columns)
                 
                 if 'begin' in df.columns:
                     df['begin'] = pd.to_datetime(df['begin'])
                     df.set_index('begin', inplace=True)
                 
-                return df
+                return df, None
     except Exception as e:
-        st.warning(f"Erreur historique pour {ticker}: {e}")
+        return None, str(e)
     
-    return None
+    return None, "Aucune donnée"
 
 def show():
     """Fonction principale"""
     
     st.markdown("# 📈 Tableau de bord MOEX")
     
-    # Sidebar pour les contrôles
+    # Sidebar
     with st.sidebar:
         st.markdown("## 🔍 Recherche")
         
-        ticker = st.text_input("Symbole", value="SBER", key="api_ticker").upper()
+        ticker = st.text_input("Symbole", value="SBER", key="ticker_input").upper()
         
         days = st.slider("Période (jours)", 7, 365, 30)
         
-        use_api = st.checkbox("Utiliser l'API MOEX", value=True, key="use_api")
+        col1, col2 = st.columns(2)
+        with col1:
+            refresh = st.button("🔄 Rafraîchir")
+        with col2:
+            use_api = st.checkbox("API réelle", value=True)
         
-        if st.button("🔄 Rafraîchir"):
+        if refresh:
             st.cache_data.clear()
             st.rerun()
+        
+        # Liste des symboles populaires
+        with st.expander("📋 Symboles populaires"):
+            st.markdown("""
+            - **SBER** - Sberbank
+            - **GAZP** - Gazprom
+            - **LKOH** - Lukoil
+            - **YNDX** - Yandex
+            - **ROSN** - Rosneft
+            - **GMKN** - Norilsk Nickel
+            - **MTSS** - MTS
+            """)
     
     if not use_api:
         # Mode démo
-        st.info("🎮 Mode démonstration - Données simulées")
+        st.info("🎮 Mode démonstration")
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -130,39 +146,37 @@ def show():
     
     # Mode API réelle
     with st.spinner(f"Connexion à l'API MOEX pour {ticker}..."):
-        # Données en temps réel
-        realtime = get_moex_data(ticker)
-        
-        # Données historiques
-        history = get_moex_history(ticker, days)
+        # Récupérer les données
+        realtime, error_realtime = get_moex_data(ticker)
+        history, error_history = get_moex_history(ticker, days)
     
     if realtime:
-        st.success(f"✅ Connecté à l'API MOEX - {ticker}")
+        st.success(f"✅ Connecté - {ticker}")
         
-        # Extraire les données importantes
-        last_price = realtime.get('LAST', 0)
+        # Extraire les données
+        last = realtime.get('LAST', 0)
         open_price = realtime.get('OPEN', 0)
         high = realtime.get('HIGH', 0)
         low = realtime.get('LOW', 0)
         volume = realtime.get('VOLT', 0)
         
-        # Calculer la variation
-        if last_price and open_price:
-            change = last_price - open_price
+        # Calculer variation
+        if last and open_price:
+            change = last - open_price
             change_pct = (change / open_price * 100) if open_price else 0
         else:
             change = 0
             change_pct = 0
         
-        # Afficher les métriques
+        # Métriques
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             delta_color = "normal" if change >= 0 else "inverse"
             st.metric(
-                f"{ticker}",
-                f"{last_price:,.2f} ₽",
-                delta=f"{change:+.2f} ({change_pct:+.1f}%)",
+                "Prix actuel",
+                f"{last:,.2f} ₽" if last else "N/A",
+                delta=f"{change:+.2f} ({change_pct:+.1f}%)" if last else None,
                 delta_color=delta_color
             )
         
@@ -177,11 +191,10 @@ def show():
         
         # Graphique historique
         if history is not None and not history.empty:
-            st.subheader(f"Évolution sur {days} jours")
+            st.subheader(f"Historique {days} jours")
             
             fig = go.Figure()
             
-            # Prix de clôture
             if 'close' in history.columns:
                 fig.add_trace(go.Scatter(
                     x=history.index,
@@ -191,26 +204,7 @@ def show():
                     line=dict(color='#D52B1E', width=2)
                 ))
             
-            # Bandes haute/basse
-            if 'high' in history.columns and 'low' in history.columns:
-                fig.add_trace(go.Scatter(
-                    x=history.index,
-                    y=history['high'],
-                    mode='lines',
-                    name='Plus haut',
-                    line=dict(color='green', width=1, dash='dash')
-                ))
-                
-                fig.add_trace(go.Scatter(
-                    x=history.index,
-                    y=history['low'],
-                    mode='lines',
-                    name='Plus bas',
-                    line=dict(color='red', width=1, dash='dash')
-                ))
-            
             fig.update_layout(
-                title=f"{ticker} - Historique",
                 xaxis_title="Date",
                 yaxis_title="Prix (₽)",
                 height=500,
@@ -220,24 +214,19 @@ def show():
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Dernières données
-            with st.expander("📋 Détails historiques"):
+            with st.expander("📊 Données historiques"):
                 st.dataframe(history.tail(10))
         else:
-            st.warning("Données historiques non disponibles")
-        
-        # Informations supplémentaires
-        with st.expander("ℹ️ Données brutes API"):
-            st.json(realtime)
+            st.warning("Historique non disponible")
     
     else:
-        st.error(f"❌ Impossible de se connecter à l'API pour {ticker}")
+        st.error(f"❌ Impossible de charger {ticker}")
+        if error_realtime:
+            st.caption(f"Erreur: {error_realtime}")
+        
         st.info("""
-        **Conseils :**
-        - Vérifiez que le symbole existe (SBER, GAZP, LKOH, YNDX, ROSN, GMKN)
+        **Suggestions :**
+        - Vérifiez le symbole (SBER, GAZP, LKOH...)
+        - Décochez "API réelle" pour le mode démo
         - Réessayez dans quelques instants
-        - Utilisez le mode démo pour tester l'interface
         """)
-
-if __name__ == "__main__":
-    show()
