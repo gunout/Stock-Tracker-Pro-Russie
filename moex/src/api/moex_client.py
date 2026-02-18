@@ -1,6 +1,5 @@
 """
-Client principal pour l'API MOEX ISS
-Documentation: https://iss.moex.com/iss/reference/
+Client pour l'API MOEX ISS - Version robuste avec gestion de tous les formats
 """
 import requests
 import pandas as pd
@@ -8,219 +7,113 @@ import time
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime, timedelta
 import logging
-from .exceptions import MOEXAPIError, MOEXRateLimitError
-from .endpoints import Endpoints, MOEX_BASE_URL
-from ..utils.cache_manager import cache
 
 logger = logging.getLogger(__name__)
 
 class MOEXClient:
     """
-    Client pour interagir avec l'API MOEX ISS
+    Client robuste pour l'API MOEX ISS
     """
     
-    def __init__(self, base_url: str = MOEX_BASE_URL, timeout: int = 30):
-        """
-        Initialise le client MOEX
-        
-        Args:
-            base_url: URL de base de l'API
-            timeout: Timeout des requêtes en secondes
-        """
-        self.base_url = base_url
-        self.timeout = timeout
+    def __init__(self):
+        self.base_url = "https://iss.moex.com/iss"
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (compatible; MOEX-Dashboard/1.0)',
-            'Accept': 'application/json'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.last_request_time = 0
-        self.min_request_interval = 1.0  # 1 seconde minimum entre requêtes
-        
+        self.min_interval = 1.0  # 1 seconde entre requêtes
+    
     def _rate_limit(self):
-        """Applique le rate limiting"""
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < self.min_request_interval:
-            time.sleep(self.min_request_interval - time_since_last)
+        """Rate limiting simple"""
+        current = time.time()
+        elapsed = current - self.last_request_time
+        if elapsed < self.min_interval:
+            time.sleep(self.min_interval - elapsed)
         self.last_request_time = time.time()
     
-    def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
-        """
-        Effectue une requête à l'API avec gestion d'erreur
-        
-        Args:
-            endpoint: Endpoint API
-            params: Paramètres de la requête
-            
-        Returns:
-            Dict: Réponse JSON de l'API
-        """
+    def _make_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict]:
+        """Effectue une requête HTTP"""
         self._rate_limit()
         
-        url = f"{self.base_url}/{endpoint}"
-        default_params = {
-            'iss.meta': 'off',
-            'iss.only': 'data',
-            'lang': 'ru'
-        }
-        
+        default_params = {'iss.meta': 'off'}
         if params:
             default_params.update(params)
         
         try:
-            logger.debug(f"Requête API: {url}")
-            response = self.session.get(
-                url, 
-                params=default_params, 
-                timeout=self.timeout
-            )
+            response = self.session.get(url, params=default_params, timeout=15)
             response.raise_for_status()
-            
-            # Vérifier les limites de taux
-            if response.status_code == 429:
-                raise MOEXRateLimitError("Rate limit atteint")
-            
             return response.json()
-            
-        except requests.exceptions.Timeout:
-            raise MOEXAPIError("Timeout de la requête")
-        except requests.exceptions.ConnectionError:
-            raise MOEXAPIError("Erreur de connexion")
-        except requests.exceptions.HTTPError as e:
-            raise MOEXAPIError(f"Erreur HTTP: {e}")
-        except ValueError as e:
-            raise MOEXAPIError(f"Erreur de parsing JSON: {e}")
+        except Exception as e:
+            logger.error(f"Erreur requête: {e}")
+            return None
     
-    def _parse_response(self, data: Dict, block_name: str) -> pd.DataFrame:
+    def _extract_dataframe(self, data: Dict, block_name: str) -> pd.DataFrame:
         """
-        Parse la réponse MOEX en DataFrame - VERSION CORRIGÉE
-        
-        Args:
-            data: Réponse JSON
-            block_name: Nom du bloc de données
-            
-        Returns:
-            pd.DataFrame: Données formatées
+        Extrait un DataFrame de la réponse MOEX - Gère tous les formats possibles
         """
-        if block_name not in data:
-            logger.warning(f"Bloc '{block_name}' non trouvé dans la réponse")
+        if not data or block_name not in data:
             return pd.DataFrame()
         
         block = data[block_name]
         
-        # Vérifier la structure de la réponse
+        # Si le bloc n'est pas un dictionnaire
         if not isinstance(block, dict):
-            logger.error(f"Format de réponse inattendu: {type(block)}")
             return pd.DataFrame()
         
-        # Vérifier la présence des colonnes et données
+        # Vérifier la présence des données
         if 'columns' not in block or 'data' not in block:
-            logger.warning(f"Structure manquante dans le bloc {block_name}")
             return pd.DataFrame()
         
-        # Traiter les colonnes - CORRECTION ICI
-        columns_data = block['columns']
-        rows_data = block['data']
+        # Extraire les colonnes - Gestion des différents formats
+        columns_raw = block['columns']
+        data_raw = block['data']
         
-        # Si columns est une liste de dictionnaires
-        if columns_data and isinstance(columns_data[0], dict):
-            columns = [col['name'] for col in columns_data]
-        # Si columns est une liste de chaînes (format alternatif)
-        elif columns_data and isinstance(columns_data[0], str):
-            columns = columns_data
+        # Cas 1: columns est une liste de dictionnaires avec 'name'
+        if columns_raw and isinstance(columns_raw[0], dict):
+            columns = [col['name'] for col in columns_raw]
+        # Cas 2: columns est une liste de chaînes
+        elif columns_raw and isinstance(columns_raw[0], str):
+            columns = columns_raw
         else:
-            logger.error(f"Format de colonnes non supporté: {type(columns_data[0]) if columns_data else 'vide'}")
+            logger.warning(f"Format de colonnes non reconnu: {type(columns_raw)}")
             return pd.DataFrame()
         
         # Créer le DataFrame
-        df = pd.DataFrame(rows_data, columns=columns)
-        
-        # Convertir les colonnes numériques
-        for col in df.columns:
-            try:
-                df[col] = pd.to_numeric(df[col], errors='ignore')
-            except:
-                pass
-        
-        return df
-    
-    @cache(ttl=3600)  # Cache d'une heure
-    def get_securities(self, board: str = "TQBR") -> pd.DataFrame:
-        """
-        Récupère la liste des actions d'un board
-        
-        Args:
-            board: Code du board (TQBR pour actions principales)
+        try:
+            df = pd.DataFrame(data_raw, columns=columns)
             
-        Returns:
-            pd.DataFrame: Liste des actions
-        """
-        endpoint = Endpoints.SECURITIES.format(board=board)
-        data = self._make_request(endpoint)
-        return self._parse_response(data, 'securities')
-    
-    @cache(ttl=300)
-    def get_security_info(self, ticker: str) -> Dict[str, Any]:
-        """
-        Récupère les informations détaillées sur une action
-        
-        Args:
-            ticker: Code de l'action (ex: SBER)
+            # Conversion automatique des types numériques
+            for col in df.columns:
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='ignore')
+                except:
+                    pass
             
-        Returns:
-            Dict: Informations sur l'action
-        """
-        endpoint = Endpoints.SECURITY_INFO.format(ticker=ticker)
-        data = self._make_request(endpoint)
-        
-        # Combiner les différentes sections
-        result = {}
-        for section in ['description', 'boards', 'dataversion']:
-            if section in data:
-                df = self._parse_response(data, section)
-                if not df.empty:
-                    result[section] = df.to_dict('records')
-        
-        return result
+            return df
+        except Exception as e:
+            logger.error(f"Erreur création DataFrame: {e}")
+            return pd.DataFrame()
     
-    @cache(ttl=10)  # Cache court pour données temps réel
-    def get_market_data(self, ticker: str) -> pd.DataFrame:
-        """
-        Récupère les données de marché en temps réel
-        
-        Args:
-            ticker: Code de l'action
-            
-        Returns:
-            pd.DataFrame: Données de marché
-        """
-        endpoint = Endpoints.MARKET_DATA.format(ticker=ticker)
-        data = self._make_request(endpoint)
-        return self._parse_response(data, 'marketdata')
-    
-    @cache(ttl=3600)
-    def get_candles(
-        self, 
-        ticker: str, 
-        interval: int = 24,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-        limit: int = 100
-    ) -> pd.DataFrame:
+    def get_candles(self, ticker: str, interval: int = 24, 
+                   from_date: Optional[str] = None,
+                   to_date: Optional[str] = None,
+                   limit: int = 100) -> pd.DataFrame:
         """
         Récupère les données historiques (bougies)
         
         Args:
-            ticker: Code de l'action
+            ticker: Code de l'action (ex: SBER)
             interval: Intervalle en minutes (1, 10, 60, 24*60)
-            from_date: Date de début (YYYY-MM-DD)
-            to_date: Date de fin (YYYY-MM-DD)
-            limit: Nombre maximum de bougies
+            from_date: Date début (YYYY-MM-DD)
+            to_date: Date fin (YYYY-MM-DD)
+            limit: Nombre max de bougies
             
         Returns:
             pd.DataFrame: Données historiques
         """
+        url = f"{self.base_url}/engines/stock/markets/shares/securities/{ticker}/candles.json"
+        
         params = {
             'interval': interval,
             'limit': limit
@@ -231,31 +124,54 @@ class MOEXClient:
         if to_date:
             params['till'] = to_date
         
-        endpoint = Endpoints.CANDLES.format(ticker=ticker)
-        data = self._make_request(endpoint, params)
-        
-        df = self._parse_response(data, 'candles')
+        data = self._make_request(url, params)
+        df = self._extract_dataframe(data, 'candles')
         
         if not df.empty and 'begin' in df.columns:
             df['begin'] = pd.to_datetime(df['begin'])
             df.set_index('begin', inplace=True)
+            
+            # Renommer les colonnes pour standardiser
+            rename_map = {
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume'
+            }
+            df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         
         return df
     
-    @cache(ttl=60)
-    def get_board_securities(self, board: str = "TQBR") -> pd.DataFrame:
+    def get_market_data(self, ticker: str) -> pd.DataFrame:
         """
-        Récupère toutes les actions d'un board avec leurs prix
+        Récupère les données de marché en temps réel
         
         Args:
-            board: Code du board
+            ticker: Code de l'action
             
         Returns:
-            pd.DataFrame: Actions avec prix
+            pd.DataFrame: Données de marché
         """
-        endpoint = Endpoints.BOARD_SECURITIES.format(board=board)
-        data = self._make_request(endpoint)
-        return self._parse_response(data, 'marketdata')
+        url = f"{self.base_url}/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json"
+        
+        data = self._make_request(url)
+        return self._extract_dataframe(data, 'marketdata')
+    
+    def get_securities(self, board: str = "TQBR") -> pd.DataFrame:
+        """
+        Récupère la liste des actions
+        
+        Args:
+            board: Code du board (TQBR pour actions principales)
+            
+        Returns:
+            pd.DataFrame: Liste des actions
+        """
+        url = f"{self.base_url}/engines/stock/markets/shares/boards/{board}/securities.json"
+        
+        data = self._make_request(url)
+        return self._extract_dataframe(data, 'securities')
     
     def search_securities(self, query: str) -> pd.DataFrame:
         """
@@ -267,13 +183,18 @@ class MOEXClient:
         Returns:
             pd.DataFrame: Résultats de recherche
         """
-        all_securities = self.get_securities()
-        if all_securities.empty:
-            return pd.DataFrame()
+        df = self.get_securities()
+        if df.empty:
+            return df
         
-        # Recherche insensible à la casse
-        mask = (
-            all_securities['SECID'].str.contains(query, case=False, na=False) |
-            all_securities['SHORTNAME'].str.contains(query, case=False, na=False)
-        )
-        return all_securities[mask]
+        # Recherche textuelle
+        mask = pd.Series([False] * len(df))
+        
+        if 'SECID' in df.columns:
+            mask |= df['SECID'].str.contains(query, case=False, na=False)
+        if 'SHORTNAME' in df.columns:
+            mask |= df['SHORTNAME'].str.contains(query, case=False, na=False)
+        if 'LONGNAME' in df.columns:
+            mask |= df['LONGNAME'].str.contains(query, case=False, na=False)
+        
+        return df[mask]
