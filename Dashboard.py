@@ -19,6 +19,10 @@ import warnings
 import random
 from requests.exceptions import HTTPError, ConnectionError
 import urllib3
+from functools import lru_cache
+import hashlib
+import pickle
+
 warnings.filterwarnings('ignore')
 
 # Désactiver les warnings SSL
@@ -32,11 +36,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Configuration du fuseau horaire - MODIFIÉ À UTC+4
-MOSCOW_TIMEZONE = pytz.timezone('Europe/Moscow')  # UTC+3 (Moscow Standard Time)
-# Note: En réalité, la Russie est passée à UTC+3 toute l'année
-# Pour UTC+4, on utilise un fuseau personnalisé
-UTC4_TIMEZONE = pytz.FixedOffset(240)  # UTC+4 = 240 minutes
+# Configuration du fuseau horaire
+MOSCOW_TIMEZONE = pytz.timezone('Europe/Moscow')  # UTC+3
+UTC4_TIMEZONE = pytz.FixedOffset(240)  # UTC+4
 
 # Style CSS personnalisé
 st.markdown("""
@@ -128,6 +130,30 @@ st.markdown("""
         font-weight: bold;
         display: inline-block;
     }
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeeba;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .info-box {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        color: #0c5460;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .cache-badge {
+        background-color: #6c757d;
+        color: white;
+        padding: 0.2rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        margin-left: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -150,26 +176,6 @@ if 'watchlist' not in st.session_state:
         'NVTK.ME',      # Novatek
         'MGNT.ME',      # Magnit
         'TATN.ME',      # Tatneft
-        'SNGS.ME',      # Surgutneftegas (pref)
-        'SNGSP.ME',     # Surgutneftegas (common)
-        'MOEX.ME',      # Moscow Exchange
-        'AFKS.ME',      # Sistema
-        'PHOR.ME',      # PhosAgro
-        'PLZL.ME',      # Polymetal
-        'ALRS.ME',      # Alrosa
-        'RUAL.ME',      # Rusal
-        'MAGN.ME',      # Magnitogorsk Iron & Steel
-        'CHMF.ME',      # Severstal
-        'NLMK.ME',      # NLMK
-        'HYDR.ME',      # RusHydro
-        'AFLT.ME',      # Aeroflot
-        'FIVE.ME',      # X5 Retail Group
-        'MAIL.ME',      # Mail.ru Group
-        'QIWI.ME',      # Qiwi
-        'TCSG.ME',      # TCS Group (Tinkoff)
-        'FESH.ME',      # FESCO
-        'LSRG.ME',      # LSR Group
-        'PIKK.ME',      # PIK Group
     ]
 
 if 'notifications' not in st.session_state:
@@ -184,8 +190,14 @@ if 'email_config' not in st.session_state:
         'password': ''
     }
 
-if 'last_successful_data' not in st.session_state:
-    st.session_state.last_successful_data = {}
+if 'data_cache' not in st.session_state:
+    st.session_state.data_cache = {}
+
+if 'last_api_call' not in st.session_state:
+    st.session_state.last_api_call = 0
+
+if 'rate_limit_hits' not in st.session_state:
+    st.session_state.rate_limit_hits = 0
 
 # Mapping des suffixes russes
 RUSSIAN_EXCHANGES = {
@@ -196,74 +208,170 @@ RUSSIAN_EXCHANGES = {
 
 # Jours fériés russes 2024
 RUSSIAN_HOLIDAYS_2024 = [
-    '2024-01-01',  # New Year Holidays
-    '2024-01-02',  # New Year Holidays
-    '2024-01-03',  # New Year Holidays
-    '2024-01-04',  # New Year Holidays
-    '2024-01-05',  # New Year Holidays
-    '2024-01-06',  # New Year Holidays
-    '2024-01-07',  # Orthodox Christmas
-    '2024-01-08',  # New Year Holidays
-    '2024-02-23',  # Defender of the Fatherland Day
-    '2024-03-08',  # International Women's Day
-    '2024-05-01',  # Spring and Labor Day
-    '2024-05-09',  # Victory Day
-    '2024-06-12',  # Russia Day
-    '2024-11-04',  # Unity Day
-    '2024-12-30',  # New Year Holidays (early)
-    '2024-12-31',  # New Year Holidays
+    '2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04', '2024-01-05',
+    '2024-01-06', '2024-01-07', '2024-01-08', '2024-02-23', '2024-03-08',
+    '2024-05-01', '2024-05-09', '2024-06-12', '2024-11-04', '2024-12-30',
+    '2024-12-31',
 ]
 
-# Fonction pour charger les données avec gestion des erreurs améliorée
-@st.cache_data(ttl=300)  # Cache réduit à 5 minutes pour des données plus fraîches
-def load_stock_data(symbol, period, interval, retry_count=5):  # Plus de tentatives
-    """Charge les données boursières avec gestion des erreurs et retry"""
+# Cache fichier pour persister les données entre les redémarrages
+CACHE_DIR = "stock_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+def get_cache_key(symbol, period, interval):
+    """Génère une clé de cache unique"""
+    return hashlib.md5(f"{symbol}_{period}_{interval}".encode()).hexdigest()
+
+def save_to_file_cache(key, data):
+    """Sauvegarde les données dans un fichier cache"""
+    try:
+        cache_file = os.path.join(CACHE_DIR, f"{key}.pkl")
+        with open(cache_file, 'wb') as f:
+            pickle.dump({
+                'timestamp': datetime.now(),
+                'data': data
+            }, f)
+    except Exception as e:
+        st.warning(f"Erreur lors de la sauvegarde du cache: {e}")
+
+def load_from_file_cache(key, max_age_minutes=30):
+    """Charge les données du cache fichier"""
+    try:
+        cache_file = os.path.join(CACHE_DIR, f"{key}.pkl")
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                cached = pickle.load(f)
+                age = datetime.now() - cached['timestamp']
+                if age.total_seconds() < max_age_minutes * 60:
+                    return cached['data']
+    except Exception as e:
+        st.warning(f"Erreur lors du chargement du cache: {e}")
+    return None
+
+def rate_limiter(min_interval=2):
+    """Limite le taux d'appels API"""
+    current_time = time.time()
+    time_since_last_call = current_time - st.session_state.last_api_call
     
-    for attempt in range(retry_count):
+    if time_since_last_call < min_interval:
+        sleep_time = min_interval - time_since_last_call
+        time.sleep(sleep_time)
+    
+    st.session_state.last_api_call = time.time()
+
+def fetch_with_retry(symbol, period, interval, max_retries=5):
+    """Récupère les données avec retry et backoff exponentiel"""
+    
+    for attempt in range(max_retries):
         try:
-            # Backoff exponentiel entre les tentatives
-            if attempt > 0:
-                wait_time = 2 ** attempt + random.uniform(0, 1)
-                time.sleep(wait_time)
+            # Appliquer le rate limiting
+            rate_limiter(min_interval=2)
             
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period=period, interval=interval, timeout=15)
             info = ticker.info
             
             if hist is not None and not hist.empty:
-                # Convertir les timestamps en UTC+4
-                if hist.index.tz is None:
-                    hist.index = hist.index.tz_localize('UTC').tz_convert(UTC4_TIMEZONE)
-                else:
-                    hist.index = hist.index.tz_convert(UTC4_TIMEZONE)
-                
-                # Sauvegarder en cache
-                st.session_state.last_successful_data[symbol] = {
-                    'hist': hist,
-                    'info': info,
-                    'timestamp': datetime.now(UTC4_TIMEZONE)
-                }
-                
                 return hist, info
             
         except Exception as e:
-            if "429" in str(e) or "Too Many Requests" in str(e):
-                st.warning(f"⚠️ Limite de requêtes. Nouvelle tentative dans {2 ** attempt}s...")
+            error_str = str(e).lower()
+            
+            if "429" in error_str or "too many requests" in error_str:
+                st.session_state.rate_limit_hits += 1
+                
+                if attempt < max_retries - 1:
+                    # Backoff exponentiel avec jitter
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    
+                    progress_text = f"⚠️ Limite API atteinte. Attente {wait_time:.1f}s..."
+                    if attempt == 0:
+                        st.toast(progress_text, icon="⏳")
+                    elif attempt == 1:
+                        st.warning(progress_text)
+                    else:
+                        with st.spinner(progress_text):
+                            time.sleep(wait_time)
+                    continue
             else:
-                if attempt < retry_count - 1:
-                    st.warning(f"⚠️ Erreur: {str(e)[:50]}. Tentative {attempt + 2}/{retry_count}...")
+                if attempt < max_retries - 1:
+                    wait_time = 1 + random.uniform(0, 1)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    st.error(f"Erreur après {max_retries} tentatives: {e}")
     
-    # Si toutes les tentatives échouent, utiliser les données en cache
-    if symbol in st.session_state.last_successful_data:
-        cached = st.session_state.last_successful_data[symbol]
-        time_diff = datetime.now(UTC4_TIMEZONE) - cached['timestamp']
-        if time_diff.total_seconds() < 7200:  # 2 heures de cache
-            st.info(f"📋 Utilisation des données en cache du {cached['timestamp'].strftime('%H:%M:%S')} (UTC+4)")
+    return None, None
+
+@st.cache_data(ttl=300, show_spinner="Chargement des données...")
+def load_stock_data_cached(symbol, period, interval):
+    """Version mise en cache du chargement des données"""
+    return fetch_with_retry(symbol, period, interval)
+
+def load_stock_data(symbol, period, interval, force_refresh=False):
+    """Charge les données avec stratégie de cache multiple"""
+    
+    cache_key = get_cache_key(symbol, period, interval)
+    
+    # Vérifier le cache session
+    if not force_refresh and cache_key in st.session_state.data_cache:
+        cached = st.session_state.data_cache[cache_key]
+        age = datetime.now() - cached['timestamp']
+        if age.total_seconds() < 300:  # 5 minutes
             return cached['hist'], cached['info']
     
-    # Si pas de cache, retourner une erreur
-    st.error(f"❌ Impossible de charger les données pour {symbol} après {retry_count} tentatives")
+    # Vérifier le cache fichier
+    if not force_refresh:
+        file_cached = load_from_file_cache(cache_key, max_age_minutes=30)
+        if file_cached:
+            hist, info = file_cached
+            st.session_state.data_cache[cache_key] = {
+                'hist': hist,
+                'info': info,
+                'timestamp': datetime.now()
+            }
+            return hist, info
+    
+    # Faire un appel API
+    with st.spinner(f"🔄 Chargement des données pour {symbol}..."):
+        hist, info = load_stock_data_cached(symbol, period, interval)
+    
+    if hist is not None and not hist.empty:
+        # Convertir en UTC+4
+        if hist.index.tz is None:
+            hist.index = hist.index.tz_localize('UTC').tz_convert(UTC4_TIMEZONE)
+        else:
+            hist.index = hist.index.tz_convert(UTC4_TIMEZONE)
+        
+        # Sauvegarder dans les caches
+        st.session_state.data_cache[cache_key] = {
+            'hist': hist,
+            'info': info,
+            'timestamp': datetime.now()
+        }
+        
+        save_to_file_cache(cache_key, (hist, info))
+        
+        return hist, info
+    
     return None, None
+
+def load_multiple_stocks(symbols, period="1d"):
+    """Charge plusieurs actions en une seule fois pour optimiser les appels"""
+    results = {}
+    
+    with st.spinner(f"Chargement de {len(symbols)} symboles..."):
+        for symbol in symbols:
+            hist, info = load_stock_data(symbol, period, "1d", force_refresh=False)
+            if hist is not None and not hist.empty:
+                results[symbol] = {
+                    'price': hist['Close'].iloc[-1],
+                    'change': ((hist['Close'].iloc[-1] / hist['Close'].iloc[-2] - 1) * 100) if len(hist) > 1 else 0
+                }
+            time.sleep(0.5)  # Petit délai entre les requêtes
+    
+    return results
 
 def get_exchange(symbol):
     """Détermine l'échange pour un symbole"""
@@ -296,19 +404,6 @@ def format_currency(value, symbol):
             return f"₽{value:,.2f}"
     else:
         return f"${value:.2f}"
-
-def format_large_number_russian(num):
-    """Formate les grands nombres selon le système russe"""
-    if num > 1e12:
-        return f"{num/1e12:.2f} трлн"
-    elif num > 1e9:
-        return f"{num/1e9:.2f} млрд"
-    elif num > 1e6:
-        return f"{num/1e6:.2f} млн"
-    elif num > 1e3:
-        return f"{num/1e3:.2f} тыс"
-    else:
-        return f"{num:,.0f}"
 
 def send_email_alert(subject, body, to_email):
     """Envoie une notification par email"""
@@ -352,14 +447,13 @@ def check_price_alerts(current_price, symbol):
 
 def get_market_status():
     """Détermine le statut du marché russe (MOEX) en UTC+4"""
-    # Heure actuelle en UTC+4
     now_utc4 = datetime.now(UTC4_TIMEZONE)
     hour = now_utc4.hour
     minute = now_utc4.minute
     weekday = now_utc4.weekday()
     date_str = now_utc4.strftime('%Y-%m-%d')
     
-    # Weekend (samedi = 5, dimanche = 6)
+    # Weekend
     if weekday >= 5:
         return "Fermé (weekend)", "🔴"
     
@@ -367,8 +461,7 @@ def get_market_status():
     if date_str in RUSSIAN_HOLIDAYS_2024:
         return "Fermé (jour férié)", "🔴"
     
-    # Horaires MOEX: 10:00 - 18:45 MSK (UTC+3)
-    # Conversion en UTC+4: 11:00 - 19:45
+    # Horaires MOEX en UTC+4: 11:00 - 19:45
     if (hour > 11 or (hour == 11 and minute >= 0)) and hour < 19:
         return "Ouvert", "🟢"
     elif hour == 19 and minute <= 45:
@@ -388,7 +481,7 @@ def safe_get_metric(hist, metric, index=-1):
 # Titre principal
 st.markdown("<h1 class='main-header'>🇷🇺 Tracker Bourse Russie - MOEX en Temps Réel</h1>", unsafe_allow_html=True)
 
-# Bannière de fuseau horaire (modifiée pour UTC+4)
+# Bannière de fuseau horaire
 current_time_utc4 = datetime.now(UTC4_TIMEZONE)
 current_time_moscow = datetime.now(MOSCOW_TIMEZONE)
 
@@ -397,9 +490,19 @@ st.markdown(f"""
     <b>🕐 Fuseaux horaires :</b><br>
     🇷🇺 Heure locale (UTC+4) : {current_time_utc4.strftime('%H:%M:%S')}<br>
     🇷🇺 Heure Moscou (MSK - UTC+3) : {current_time_moscow.strftime('%H:%M:%S')}<br>
-    📍 Toutes les heures affichées sont en UTC+4 (heure locale)
+    📍 Toutes les heures affichées sont en UTC+4
 </div>
 """, unsafe_allow_html=True)
+
+# Avertissement API si trop de hits
+if st.session_state.rate_limit_hits > 5:
+    st.markdown("""
+    <div class='warning-box'>
+        <b>⚠️ Limitations API détectées</b><br>
+        Yahoo Finance applique des limites de requêtes. Les données peuvent être en cache ou retardées.
+        Les actualisations automatiques sont temporairement ralenties.
+    </div>
+    """, unsafe_allow_html=True)
 
 # Note sur le marché russe
 st.markdown("""
@@ -408,9 +511,8 @@ st.markdown("""
     <span class='rts-badge'>RTS</span><br>
     🇷🇺 Bourse de Moscou (MOEX) - Principale bourse russe<br>
     - Actions MOEX: suffixe .ME (ex: SBER.ME - Sberbank)<br>
-    - ADRs: symboles US (ex: Yandex → YNDX, Mobile TeleSystems → MBT)<br>
-    - RTS Index: indices en dollars, MOEX Index: indices en roubles<br>
-    Horaires trading: Lundi-Vendredi 10:00 - 18:45 (MSK) → 11:00 - 19:45 (UTC+4)
+    - ADRs: symboles US (ex: Yandex → YNDX)<br>
+    Horaires trading: 11:00 - 19:45 (UTC+4)
 </div>
 """, unsafe_allow_html=True)
 
@@ -418,6 +520,12 @@ st.markdown("""
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/000000/russian-federation.png", width=80)
     st.title("Navigation")
+    
+    # Bouton de rafraîchissement forcé
+    if st.button("🔄 Forcer le rafraîchissement", use_container_width=True):
+        st.cache_data.clear()
+        st.session_state.data_cache = {}
+        st.rerun()
     
     st.markdown("---")
     
@@ -434,9 +542,8 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Configuration commune
+    # Configuration
     st.subheader("⚙️ Configuration")
-    st.caption(f"🕐 Fuseau horaire : UTC+4")
     
     # Sélection du symbole principal
     symbol = st.selectbox(
@@ -450,19 +557,12 @@ with st.sidebar:
         if symbol and symbol not in st.session_state.watchlist:
             st.session_state.watchlist.append(symbol)
     
-    st.caption("""
-    📍 Suffixes Russie:
-    - .ME: MOEX (Moscow Exchange)
-    - .MM: MOEX (format alternatif)
-    - Sans suffixe: ADR US
-    """)
-    
     # Période et intervalle
     col1, col2 = st.columns(2)
     with col1:
         period = st.selectbox(
             "Période",
-            options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+            options=["1d", "5d", "1mo", "3mo", "6mo", "1y"],
             index=2
         )
     
@@ -470,7 +570,7 @@ with st.sidebar:
         interval_map = {
             "1m": "1 minute", "5m": "5 minutes", "15m": "15 minutes",
             "30m": "30 minutes", "1h": "1 heure", "1d": "1 jour",
-            "1wk": "1 semaine", "1mo": "1 mois"
+            "1wk": "1 semaine"
         }
         interval = st.selectbox(
             "Intervalle",
@@ -479,22 +579,29 @@ with st.sidebar:
             index=6
         )
     
-    # Auto-refresh
-    auto_refresh = st.checkbox("Actualisation automatique", value=False)
+    # Auto-refresh avec intervalle plus long si limitations
+    auto_refresh = st.checkbox("Actualisation auto", value=False)
     if auto_refresh:
+        min_refresh = 120 if st.session_state.rate_limit_hits > 3 else 60
         refresh_rate = st.slider(
-            "Fréquence (secondes)",
-            min_value=30,
+            "Fréquence (s)",
+            min_value=min_refresh,
             max_value=300,
-            value=60,
-            step=10
+            value=min_refresh,
+            step=30
         )
+    
+    # Stats API
+    st.markdown("---")
+    st.caption(f"📊 Appels API: {st.session_state.rate_limit_hits} limitations")
+    st.caption(f"💾 Cache: {len(st.session_state.data_cache)} entrées")
 
 # Chargement des données
 hist, info = load_stock_data(symbol, period, interval)
 
 if hist is None or hist.empty:
-    st.error(f"❌ Impossible de charger les données pour {symbol}. Veuillez réessayer plus tard.")
+    st.error(f"❌ Impossible de charger les données pour {symbol}")
+    st.info("💡 Suggestions:\n- Réessayez dans quelques minutes\n- Vérifiez que le symbole est correct\n- Utilisez le bouton 'Forcer le rafraîchissement'")
     st.stop()
 
 current_price = safe_get_metric(hist, 'Close')
@@ -505,17 +612,6 @@ for alert in triggered_alerts:
     st.balloons()
     st.success(f"🎯 Alerte déclenchée pour {symbol} à {format_currency(current_price, symbol)}")
     
-    if st.session_state.email_config['enabled']:
-        subject = f"🚨 Alerte prix - {symbol}"
-        body = f"""
-        <h2>Alerte de prix déclenchée</h2>
-        <p><b>Symbole:</b> {symbol}</p>
-        <p><b>Prix actuel:</b> {format_currency(current_price, symbol)}</p>
-        <p><b>Condition:</b> {alert['condition']} {format_currency(alert['price'], symbol)}</p>
-        <p><b>Date:</b> {datetime.now(UTC4_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} (UTC+4)</p>
-        """
-        send_email_alert(subject, body, st.session_state.email_config['email'])
-    
     if alert.get('one_time', False):
         st.session_state.price_alerts.remove(alert)
 
@@ -525,7 +621,13 @@ for alert in triggered_alerts:
 if menu == "📈 Tableau de bord":
     # Statut du marché
     market_status, market_icon = get_market_status()
-    st.info(f"{market_icon} Marché Russe (MOEX): {market_status}")
+    
+    col_status, col_cache = st.columns([3, 1])
+    with col_status:
+        st.info(f"{market_icon} Marché Russe (MOEX): {market_status}")
+    with col_cache:
+        cache_age = datetime.now(UTC4_TIMEZONE) - hist.index[-1]
+        st.caption(f"🕒 Données: il y a {cache_age.total_seconds()//60:.0f} min")
     
     if hist is not None and not hist.empty:
         exchange = get_exchange(symbol)
@@ -659,13 +761,16 @@ if menu == "📈 Tableau de bord":
                     else:
                         st.write("**Capitalisation :** N/A")
                     
-                    st.write(f"**P/E :** {info.get('trailingPE', 'N/A')}")
-                    st.write(f"**Dividende :** {info.get('dividendYield', 0)*100:.2f}%" if info.get('dividendYield') else "**Dividende :** N/A")
-                    st.write(f"**Beta :** {info.get('beta', 'N/A')}")
+                    pe = info.get('trailingPE', 'N/A')
+                    st.write(f"**P/E :** {pe if pe != 'N/A' else 'N/A'}")
+                    
+                    div_yield = info.get('dividendYield', 0)
+                    st.write(f"**Dividende :** {div_yield*100:.2f}%" if div_yield else "**Dividende :** N/A")
+                    
+                    beta = info.get('beta', 'N/A')
+                    st.write(f"**Beta :** {beta if beta != 'N/A' else 'N/A'}")
             else:
                 st.write("Informations non disponibles")
-    else:
-        st.warning(f"Aucune donnée disponible pour {symbol}")
 
 # ============================================================================
 # SECTION 2: PORTEFEUILLE VIRTUEL
@@ -679,13 +784,6 @@ elif menu == "💰 Portefeuille virtuel":
         st.markdown("### ➕ Ajouter une position")
         with st.form("add_position"):
             symbol_pf = st.text_input("Symbole", value="SBER.ME").upper()
-            
-            st.caption("""
-            Suffixes Russie:
-            - .ME: MOEX (Moscow Exchange)
-            - Sans suffixe: ADR US
-            """)
-            
             shares = st.number_input("Nombre d'actions", min_value=1, step=1, value=100)
             buy_price = st.number_input("Prix d'achat (₽)", min_value=0.01, step=10.0, value=280.0)
             
@@ -708,17 +806,11 @@ elif menu == "💰 Portefeuille virtuel":
             portfolio_data = []
             total_value_rub = 0
             total_cost_rub = 0
-            total_value_usd = 0
-            total_cost_usd = 0
-            
-            # Taux de change approximatif
-            usd_rub_rate = 90.0  # 1 USD = 90 RUB
             
             for symbol_pf, positions in st.session_state.portfolio.items():
                 try:
-                    ticker = yf.Ticker(symbol_pf)
-                    hist = ticker.history(period='1d')
-                    current = hist['Close'].iloc[-1] if not hist.empty else 0
+                    hist, _ = load_stock_data(symbol_pf, "1d", "1d", force_refresh=False)
+                    current = hist['Close'].iloc[-1] if hist is not None and not hist.empty else 0
                     
                     exchange = get_exchange(symbol_pf)
                     currency = get_currency(symbol_pf)
@@ -734,34 +826,15 @@ elif menu == "💰 Portefeuille virtuel":
                         if currency == 'RUB':
                             total_cost_rub += cost
                             total_value_rub += value
-                            total_cost_usd += cost / usd_rub_rate
-                            total_value_usd += value / usd_rub_rate
-                        else:
-                            total_cost_usd += cost
-                            total_value_usd += value
-                            total_cost_rub += cost * usd_rub_rate
-                            total_value_rub += value * usd_rub_rate
-                        
-                        if currency == 'RUB':
-                            buy_price_str = f"₽{buy_price:,.2f}"
-                            current_str = f"₽{current:,.2f}"
-                            value_str = f"₽{value:,.2f}"
-                            profit_str = f"₽{profit:,.2f}"
-                        else:
-                            buy_price_str = f"${buy_price:.2f}"
-                            current_str = f"${current:.2f}"
-                            value_str = f"${value:,.2f}"
-                            profit_str = f"${profit:,.2f}"
                         
                         portfolio_data.append({
                             'Symbole': symbol_pf,
                             'Marché': exchange,
-                            'Devise': currency,
                             'Actions': shares,
-                            "Prix d'achat": buy_price_str,
-                            'Prix actuel': current_str,
-                            'Valeur': value_str,
-                            'Profit': profit_str,
+                            "Prix d'achat": f"₽{buy_price:,.2f}",
+                            'Prix actuel': f"₽{current:,.2f}" if current else "N/A",
+                            'Valeur': f"₽{value:,.2f}",
+                            'Profit': f"₽{profit:,.2f}",
                             'Profit %': f"{profit_pct:.1f}%"
                         })
                 except Exception as e:
@@ -771,40 +844,14 @@ elif menu == "💰 Portefeuille virtuel":
                 total_profit_rub = total_value_rub - total_cost_rub
                 total_profit_pct_rub = (total_profit_rub / total_cost_rub * 100) if total_cost_rub > 0 else 0
                 
-                st.markdown("#### Total en Roubles (RUB)")
                 col_i1, col_i2, col_i3 = st.columns(3)
                 col_i1.metric("Valeur totale", f"₽{total_value_rub:,.2f}")
                 col_i2.metric("Coût total", f"₽{total_cost_rub:,.2f}")
-                col_i3.metric(
-                    "Profit total",
-                    f"₽{total_profit_rub:,.2f}",
-                    delta=f"{total_profit_pct_rub:.1f}%"
-                )
-                
-                total_profit_usd = total_value_usd - total_cost_usd
-                total_profit_pct_usd = (total_profit_usd / total_cost_usd * 100) if total_cost_usd > 0 else 0
-                
-                st.markdown("#### Total en Dollars (USD)")
-                col_u1, col_u2, col_u3 = st.columns(3)
-                col_u1.metric("Valeur totale", f"${total_value_usd:,.2f}")
-                col_u2.metric("Coût total", f"${total_cost_usd:,.2f}")
-                col_u3.metric("Profit total", f"${total_profit_usd:,.2f}", delta=f"{total_profit_pct_usd:.1f}%")
-                
-                st.caption(f"Taux de change utilisé: 1 USD = {usd_rub_rate} RUB")
+                col_i3.metric("Profit total", f"₽{total_profit_rub:,.2f}", delta=f"{total_profit_pct_rub:.1f}%")
                 
                 st.markdown("### 📋 Positions détaillées")
                 df_portfolio = pd.DataFrame(portfolio_data)
                 st.dataframe(df_portfolio, use_container_width=True)
-                
-                try:
-                    fig_pie = px.pie(
-                        names=[p['Symbole'] for p in portfolio_data],
-                        values=[float(p['Valeur'].replace('₽', '').replace('$', '').replace(',', '')) for p in portfolio_data],
-                        title="Répartition du portefeuille"
-                    )
-                    st.plotly_chart(fig_pie)
-                except:
-                    st.warning("Impossible de générer le graphique")
                 
                 if st.button("🗑️ Vider le portefeuille"):
                     st.session_state.portfolio = {}
@@ -812,7 +859,7 @@ elif menu == "💰 Portefeuille virtuel":
             else:
                 st.info("Aucune donnée de performance disponible")
         else:
-            st.info("Aucune position dans le portefeuille. Ajoutez des actions russes pour commencer !")
+            st.info("Aucune position dans le portefeuille")
 
 # ============================================================================
 # SECTION 3: ALERTES DE PRIX
@@ -826,8 +873,6 @@ elif menu == "🔔 Alertes de prix":
         st.markdown("### ➕ Créer une nouvelle alerte")
         with st.form("new_alert"):
             alert_symbol = st.text_input("Symbole", value=symbol if symbol else "SBER.ME").upper()
-            exchange = get_exchange(alert_symbol)
-            st.caption(f"Marché: {exchange}")
             
             default_price = float(current_price * 1.05) if current_price > 0 else 280.0
             alert_price = st.number_input(
@@ -854,7 +899,7 @@ elif menu == "🔔 Alertes de prix":
                     'one_time': one_time,
                     'created': datetime.now(UTC4_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
                 })
-                st.success(f"✅ Alerte créée pour {alert_symbol} à {format_currency(alert_price, alert_symbol)}")
+                st.success(f"✅ Alerte créée pour {alert_symbol}")
     
     with col2:
         st.markdown("### 📋 Alertes actives")
@@ -864,7 +909,7 @@ elif menu == "🔔 Alertes de prix":
                     st.markdown(f"""
                     <div class='alert-box alert-warning'>
                         <b>{alert['symbol']}</b> - {alert['condition']} {format_currency(alert['price'], alert['symbol'])}<br>
-                        <small>Créée: {alert['created']} (UTC+4) | {('Usage unique' if alert['one_time'] else 'Permanent')}</small>
+                        <small>Créée: {alert['created']} | {('Unique' if alert['one_time'] else 'Permanent')}</small>
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -911,15 +956,12 @@ elif menu == "📧 Notifications email":
                 if test_email:
                     if send_email_alert(
                         "Test de notification",
-                        f"<h2>Test réussi !</h2><p>Votre configuration email fonctionne correctement !</p><p>Heure d'envoi: {datetime.now(UTC4_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} (UTC+4)</p>",
+                        f"<h2>Test réussi !</h2><p>{datetime.now(UTC4_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} (UTC+4)</p>",
                         test_email
                     ):
                         st.success("Email de test envoyé !")
                     else:
                         st.error("Échec de l'envoi")
-    
-    with st.expander("📋 Aperçu de la configuration"):
-        st.json(st.session_state.email_config)
 
 # ============================================================================
 # SECTION 5: EXPORT DES DONNÉES
@@ -945,10 +987,7 @@ elif menu == "📤 Export des données":
             )
         
         with col2:
-            st.markdown("### 📈 Rapport PDF")
-            st.info("Génération de rapport PDF (simulée)")
-            
-            st.markdown("**Statistiques:**")
+            st.markdown("### 📈 Statistiques")
             stats = {
                 'Moyenne': hist['Close'].mean(),
                 'Écart-type': hist['Close'].std(),
@@ -971,7 +1010,6 @@ elif menu == "📤 Export des données":
                 'timezone': 'UTC+4',
                 'current_price': float(current_price) if current_price else 0,
                 'statistics': {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in stats.items()},
-                'data': hist.reset_index().to_dict(orient='records')
             }
             
             st.download_button(
@@ -980,27 +1018,14 @@ elif menu == "📤 Export des données":
                 file_name=f"{symbol}_data_{datetime.now(UTC4_TIMEZONE).strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json"
             )
-    else:
-        st.warning(f"Aucune donnée à exporter pour {symbol}")
 
 # ============================================================================
 # SECTION 6: PRÉDICTIONS ML
 # ============================================================================
 elif menu == "🤖 Prédictions ML":
-    st.subheader("🤖 Prédictions avec Machine Learning - Actions Russes")
+    st.subheader("🤖 Prédictions avec Machine Learning")
     
     if hist is not None and not hist.empty and len(hist) > 30:
-        st.markdown("### Modèle de prédiction (Régression polynomiale)")
-        
-        st.info("""
-        ⚠️ Facteurs influençant la bourse russe:
-        - Prix du pétrole et du gaz (Brent, Urals)
-        - Taux de change USD/RUB
-        - Politique monétaire de la Banque Centrale de Russie (CBR)
-        - Tensions géopolitiques et sanctions internationales
-        - Dividendes des géants énergétiques
-        """)
-        
         df_pred = hist[['Close']].reset_index()
         df_pred['Days'] = (df_pred['Date'] - df_pred['Date'].min()).dt.days
         
@@ -1065,7 +1090,7 @@ elif menu == "🤖 Prédictions ML":
             ))
         
         fig_pred.update_layout(
-            title=f"Prédictions pour {symbol} - {days_to_predict} jours (UTC+4)",
+            title=f"Prédictions pour {symbol} - {days_to_predict} jours",
             xaxis_title="Date (UTC+4)",
             yaxis_title=f"Prix ({'₽' if get_currency(symbol)=='RUB' else '$'})",
             hovermode='x unified',
@@ -1081,20 +1106,6 @@ elif menu == "🤖 Prédictions ML":
             'Variation %': [f"{(p/current_price - 1)*100:.2f}%" for p in predictions]
         })
         st.dataframe(pred_df, use_container_width=True)
-        
-        st.markdown("### 📊 Performance du modèle")
-        residuals = y - model.predict(X)
-        mse = np.mean(residuals**2)
-        rmse = np.sqrt(mse)
-        mae = np.mean(np.abs(residuals))
-        
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("RMSE", f"{format_currency(rmse, symbol)}")
-        col_m2.metric("MAE", f"{format_currency(mae, symbol)}")
-        col_m3.metric("R²", f"{model.score(X, y):.3f}")
-        
-    else:
-        st.warning(f"Pas assez de données historiques pour {symbol} (minimum 30 points)")
 
 # ============================================================================
 # SECTION 7: INDICES MOEX & RTS
@@ -1106,45 +1117,24 @@ elif menu == "🇷🇺 Indices MOEX & RTS":
         'IMOEX.ME': 'MOEX Russia Index (Roubles)',
         'RTSI.ME': 'RTS Index (Dollars)',
         'RGBI.ME': 'Russian Government Bond Index',
-        'MICEX10.ME': 'MICEX 10 Index',
-        'MICEXFNL.ME': 'MICEX Financials Index',
-        'MICEXO&G.ME': 'MICEX Oil & Gas Index',
-        'MICEXMM.ME': 'MICEX Metals & Mining Index',
-        'MICEXTLC.ME': 'MICEX Telecoms Index',
-        'MICEXPWR.ME': 'MICEX Power Index',
-        'MICEXCGS.ME': 'MICEX Consumer Goods Index',
     }
     
     col1, col2 = st.columns([2, 1])
     
     with col2:
-        st.markdown("### 🇷🇺 Sélection d'indice")
+        st.markdown("### 🇷🇺 Sélection")
         selected_index = st.selectbox(
             "Choisir un indice",
             options=list(russian_indices.keys()),
             format_func=lambda x: f"{russian_indices[x]} ({x})",
             index=0
         )
-        
-        st.markdown("### 📊 Performance des indices")
-        perf_period = st.selectbox(
-            "Période de comparaison",
-            options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "5y"],
-            index=0
-        )
     
     with col1:
         try:
-            index_ticker = yf.Ticker(selected_index)
-            index_hist = index_ticker.history(period=perf_period)
+            index_hist, _ = load_stock_data(selected_index, "1mo", "1d")
             
-            if not index_hist.empty:
-                # Convertir en UTC+4
-                if index_hist.index.tz is None:
-                    index_hist.index = index_hist.index.tz_localize('UTC').tz_convert(UTC4_TIMEZONE)
-                else:
-                    index_hist.index = index_hist.index.tz_convert(UTC4_TIMEZONE)
-                
+            if index_hist is not None and not index_hist.empty:
                 current_index = index_hist['Close'].iloc[-1]
                 prev_index = index_hist['Close'].iloc[-2] if len(index_hist) > 1 else current_index
                 index_change = current_index - prev_index
@@ -1168,92 +1158,19 @@ elif menu == "🇷🇺 Indices MOEX & RTS":
                     line=dict(color='#D52B1E', width=2)
                 ))
                 
-                if len(index_hist) > 20:
-                    ma_20 = index_hist['Close'].rolling(window=20).mean()
-                    ma_50 = index_hist['Close'].rolling(window=50).mean()
-                    
-                    fig_index.add_trace(go.Scatter(
-                        x=index_hist.index,
-                        y=ma_20,
-                        mode='lines',
-                        name='MA 20',
-                        line=dict(color='orange', width=1, dash='dash')
-                    ))
-                    
-                    fig_index.add_trace(go.Scatter(
-                        x=index_hist.index,
-                        y=ma_50,
-                        mode='lines',
-                        name='MA 50',
-                        line=dict(color='purple', width=1, dash='dash')
-                    ))
-                
                 fig_index.update_layout(
-                    title=f"Évolution - {perf_period} (UTC+4)",
+                    title=f"Évolution - 1 mois",
                     xaxis_title="Date (UTC+4)",
                     yaxis_title="Points",
-                    height=500,
-                    hovermode='x unified',
+                    height=400,
                     template='plotly_white'
                 )
                 
                 st.plotly_chart(fig_index, use_container_width=True)
-                
-                st.markdown("### 📈 Statistiques")
-                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-                col_s1.metric("Plus haut", f"{index_hist['High'].max():,.2f}")
-                col_s2.metric("Plus bas", f"{index_hist['Low'].min():,.2f}")
-                col_s3.metric("Moyenne", f"{index_hist['Close'].mean():,.2f}")
-                col_s4.metric("Volatilité", f"{index_hist['Close'].pct_change().std()*100:.2f}%")
             else:
                 st.warning("Données non disponibles")
         except Exception as e:
-            st.error(f"Erreur lors du chargement: {e}")
-    
-    # Tableau de comparaison des indices
-    st.markdown("### 📊 Comparaison des indices")
-    
-    comparison_data = []
-    for idx, name in list(russian_indices.items())[:10]:
-        try:
-            ticker = yf.Ticker(idx)
-            hist = ticker.history(period="5d")
-            if not hist.empty:
-                current = hist['Close'].iloc[-1]
-                prev = hist['Close'].iloc[0]
-                change_pct = ((current - prev) / prev * 100) if prev != 0 else 0
-                
-                comparison_data.append({
-                    'Indice': name,
-                    'Symbole': idx,
-                    'Valeur': f"{current:,.2f}",
-                    'Variation 5j': f"{change_pct:.2f}%",
-                    'Direction': '📈' if change_pct > 0 else '📉' if change_pct < 0 else '➡️'
-                })
-        except:
-            pass
-    
-    if comparison_data:
-        df_comparison = pd.DataFrame(comparison_data)
-        st.dataframe(df_comparison, use_container_width=True)
-    
-    with st.expander("ℹ️ À propos des indices russes"):
-        st.markdown("""
-        **MOEX Russia Index (IMOEX):**
-        - Principal indice de la Bourse de Moscou
-        - Libellé en roubles russes (RUB)
-        - Toutes les actions les plus liquides de la cote
-        
-        **RTS Index (RTSI):**
-        - Même composition que le MOEX mais libellé en dollars USD
-        - Baromètre pour les investisseurs étrangers
-        - Sensible aux variations du taux de change USD/RUB
-        
-        **Horaires de trading (UTC+4):**
-        - Session principale: 11:00 - 19:45
-        - Pré-ouverture: 10:45 - 11:00
-        - Week-end: Fermé
-        """)
+            st.error(f"Erreur: {e}")
 
 # ============================================================================
 # WATCHLIST
@@ -1262,56 +1179,28 @@ st.markdown("---")
 col_w1, col_w2 = st.columns([3, 1])
 
 with col_w1:
-    st.subheader("📋 Watchlist Russie")
+    st.subheader("📋 Watchlist")
     
-    moex_stocks = [s for s in st.session_state.watchlist if s.endswith('.ME')]
-    us_stocks = [s for s in st.session_state.watchlist if not s.endswith('.ME')]
+    if st.button("🔄 Rafraîchir la watchlist", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
     
-    tabs = st.tabs(["MOEX", "ADR US"])
+    # Charger les données de la watchlist de manière optimisée
+    watchlist_data = load_multiple_stocks(st.session_state.watchlist[:8])  # Limiter à 8 pour éviter trop d'appels
     
-    with tabs[0]:
-        if moex_stocks:
-            cols_per_row = 4
-            for i in range(0, len(moex_stocks), cols_per_row):
-                cols = st.columns(min(cols_per_row, len(moex_stocks) - i))
-                for j, sym in enumerate(moex_stocks[i:i+cols_per_row]):
-                    with cols[j]:
-                        try:
-                            ticker = yf.Ticker(sym)
-                            hist = ticker.history(period='1d')
-                            if not hist.empty:
-                                price = hist['Close'].iloc[-1]
-                                prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else price
-                                change = ((price - prev_close) / prev_close * 100)
-                                st.metric(sym, f"₽{price:,.2f}", delta=f"{change:.1f}%")
-                            else:
-                                st.metric(sym, "N/A")
-                        except:
-                            st.metric(sym, "Erreur")
-        else:
-            st.info("Aucune action MOEX")
+    cols_per_row = 4
+    symbols_list = list(watchlist_data.keys())
     
-    with tabs[1]:
-        if us_stocks:
-            cols_per_row = 4
-            for i in range(0, len(us_stocks), cols_per_row):
-                cols = st.columns(min(cols_per_row, len(us_stocks) - i))
-                for j, sym in enumerate(us_stocks[i:i+cols_per_row]):
-                    with cols[j]:
-                        try:
-                            ticker = yf.Ticker(sym)
-                            hist = ticker.history(period='1d')
-                            if not hist.empty:
-                                price = hist['Close'].iloc[-1]
-                                prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else price
-                                change = ((price - prev_close) / prev_close * 100)
-                                st.metric(sym, f"${price:.2f}", delta=f"{change:.1f}%")
-                            else:
-                                st.metric(sym, "N/A")
-                        except:
-                            st.metric(sym, "Erreur")
-        else:
-            st.info("Aucune action US")
+    for i in range(0, len(symbols_list), cols_per_row):
+        cols = st.columns(min(cols_per_row, len(symbols_list) - i))
+        for j, sym in enumerate(symbols_list[i:i+cols_per_row]):
+            with cols[j]:
+                data = watchlist_data[sym]
+                st.metric(
+                    sym, 
+                    format_currency(data['price'], sym),
+                    delta=f"{data['change']:.1f}%"
+                )
 
 with col_w2:
     current_time = datetime.now(UTC4_TIMEZONE)
@@ -1328,8 +1217,7 @@ with col_w2:
 st.markdown("---")
 st.markdown(
     "<p style='text-align: center; color: gray; font-size: 0.8rem;'>"
-    "🇷🇺 Tracker Bourse Russie - MOEX & RTS | Données fournies par yfinance | "
-    "⚠️ Données avec délai possible | 🕐 Tous les horaires en UTC+4"
+    "🇷🇺 Tracker Bourse Russie - MOEX | Données yfinance | 🕐 UTC+4"
     "</p>",
     unsafe_allow_html=True
 )
