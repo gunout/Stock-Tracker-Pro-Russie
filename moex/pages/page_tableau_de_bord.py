@@ -1,137 +1,162 @@
 """
-Page du tableau de bord principal - Version robuste
+Page Tableau de bord - Version complète
 """
 import streamlit as st
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import sys
 from pathlib import Path
-import traceback
 
-# Ajouter le chemin racine au PYTHONPATH
+# Ajouter le chemin racine
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Imports avec gestion d'erreur
+# Imports nécessaires
 try:
     from src.api.moex_client import MOEXClient
-    from src.data.processors import DataProcessor
-    from src.data.validators import DataValidator
     from src.visualization.charts import create_price_chart, create_candle_chart
-    from src.utils.formatters import format_currency, format_percentage
+    from src.utils.formatters import format_currency
     IMPORTS_OK = True
 except ImportError as e:
-    st.error(f"Erreur d'import des modules: {e}")
+    st.error(f"Erreur d'import: {e}")
     IMPORTS_OK = False
 
-def get_mock_data():
-    """Génère des données de démonstration si l'API n'est pas disponible"""
-    import numpy as np
-    dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
-    prices = 100 + np.cumsum(np.random.randn(30) * 2)
-    df = pd.DataFrame({
+def generate_demo_data():
+    """Génère des données de démonstration"""
+    np.random.seed(42)  # Pour des résultats reproductibles
+    dates = pd.date_range(end=datetime.now(), periods=100, freq='D')
+    
+    # Générer des prix avec une tendance
+    base = 100
+    returns = np.random.randn(100) * 0.02
+    prices = base * (1 + np.cumsum(returns))
+    
+    return pd.DataFrame({
         'Open': prices * 0.99,
         'High': prices * 1.02,
         'Low': prices * 0.98,
         'Close': prices,
-        'Volume': np.random.randint(1000000, 5000000, 30)
+        'Volume': np.random.randint(1000000, 5000000, 100)
     }, index=dates)
-    return df
+
+def show_demo_mode():
+    """Affiche le mode démonstration"""
+    st.info("🎮 Mode démonstration - Données simulées")
+    
+    # Métriques de démo
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("SBER", "280.50 ₽", "+1.2%")
+    with col2:
+        st.metric("GAZP", "165.80 ₽", "-0.5%")
+    with col3:
+        st.metric("LKOH", "7200.50 ₽", "+2.1%")
+    with col4:
+        st.metric("YNDX", "2850.00 ₽", "+1.8%")
+    
+    # Graphique de démo
+    hist_data = generate_demo_data()
+    
+    # Vérifier que create_price_chart est disponible
+    if 'create_price_chart' in globals():
+        fig = create_price_chart(hist_data, title="Données simulées - Évolution")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        # Fallback: graphique simple avec Streamlit
+        st.subheader("Évolution simulée")
+        st.line_chart(hist_data['Close'])
+    
+    with st.expander("ℹ️ Informations"):
+        st.markdown("""
+        **Mode démonstration activé**
+        - Les données sont simulées
+        - Utilisez des symboles réels (SBER, GAZP, LKOH) pour les données réelles
+        - Vérifiez votre connexion internet
+        """)
 
 def show():
-    """Affiche la page du tableau de bord"""
+    """Fonction principale de la page"""
     
     st.markdown("# 📈 Tableau de bord MOEX")
     
-    # Vérifier que les imports sont OK
+    # Vérification des imports
     if not IMPORTS_OK:
-        st.warning("Mode démo activé - Utilisation de données simulées")
+        st.error("Erreur de configuration - Mode démo uniquement")
         show_demo_mode()
         return
     
-    # Sidebar pour les contrôles (dans la page)
+    # Sidebar dans la page
     with st.sidebar:
         st.markdown("## 🔍 Options")
         
-        # Sélection de l'action
-        ticker = st.text_input("Symbole", value="SBER", key="dashboard_ticker").upper()
+        ticker = st.text_input("Symbole", value="SBER", key="ticker").upper()
         
-        # Période
         period = st.selectbox(
             "Période",
-            options=["1j", "5j", "1m", "3m", "6m", "1a"],
-            index=2,
-            key="dashboard_period"
+            options=["7j", "30j", "90j", "180j", "365j"],
+            index=1,
+            format_func=lambda x: x.replace('j', ' jours')
         )
         
-        # Type de graphique
         chart_type = st.radio(
-            "Type",
+            "Type de graphique",
             ["Ligne", "Bougies"],
-            horizontal=True,
-            key="dashboard_chart"
+            horizontal=True
         )
+        
+        use_demo = st.checkbox("Forcer mode démo", value=False)
     
-    # Chargement des données
+    # Mode démo forcé
+    if use_demo:
+        show_demo_mode()
+        return
+    
+    # Mode réel
     try:
-        # Vérifier si le client API existe
-        if 'moex_client' not in st.session_state:
-            st.session_state.moex_client = MOEXClient()
+        client = MOEXClient()
         
-        client = st.session_state.moex_client
-        
-        # Mapping période -> jours
-        period_days = {"1j": 1, "5j": 5, "1m": 30, "3m": 90, "6m": 180, "1a": 365}
+        # Conversion de la période
+        period_days = {"7j": 7, "30j": 30, "90j": 90, "180j": 180, "365j": 365}
         days = period_days.get(period, 30)
         
         with st.spinner(f"Chargement des données pour {ticker}..."):
-            # Date de fin = aujourd'hui
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            # Date de début
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
             
-            # Récupérer les données
             hist_data = client.get_candles(
                 ticker,
-                interval=24*60,
-                from_date=start_date,
-                to_date=end_date
+                from_date=start_date.strftime('%Y-%m-%d'),
+                to_date=end_date.strftime('%Y-%m-%d')
             )
             
             market_data = client.get_market_data(ticker)
         
-        if hist_data is None or hist_data.empty:
-            st.warning(f"Pas de données pour {ticker}. Utilisation de données simulées.")
-            hist_data = get_mock_data()
-            market_data = pd.DataFrame()
-        
-        # Traitement des données
-        processor = DataProcessor()
-        hist_data = processor.process_candles(hist_data)
-        
-        # Prix actuel
-        current_price = hist_data['Close'].iloc[-1]
-        prev_close = hist_data['Close'].iloc[-2] if len(hist_data) > 1 else current_price
-        
-        change = current_price - prev_close
-        change_pct = (change / prev_close * 100) if prev_close != 0 else 0
+        if hist_data.empty:
+            st.warning(f"Pas de données pour {ticker}")
+            show_demo_mode()
+            return
         
         # Métriques
-        col1, col2, col3, col4 = st.columns(4)
+        current = hist_data['Close'].iloc[-1]
+        prev = hist_data['Close'].iloc[-2] if len(hist_data) > 1 else current
+        change = current - prev
+        change_pct = (change / prev * 100) if prev != 0 else 0
         
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric(
                 "Prix",
-                format_currency(current_price),
+                f"{current:,.2f} ₽",
                 delta=f"{change:+.2f} ({change_pct:+.1f}%)"
             )
         
         with col2:
             high = hist_data['High'].max()
-            st.metric("Plus haut", format_currency(high))
+            st.metric("Plus haut", f"{high:,.2f} ₽")
         
         with col3:
             low = hist_data['Low'].min()
-            st.metric("Plus bas", format_currency(low))
+            st.metric("Plus bas", f"{low:,.2f} ₽")
         
         with col4:
             volume = hist_data['Volume'].mean()
@@ -139,46 +164,24 @@ def show():
         
         # Graphique
         if chart_type == "Ligne":
-            fig = create_price_chart(hist_data, title=f"{ticker} - {period}")
+            fig = create_price_chart(
+                hist_data,
+                title=f"{ticker} - Évolution du prix",
+                show_volume=True
+            )
         else:
-            fig = create_candle_chart(hist_data, title=f"{ticker} - {period}")
+            fig = create_candle_chart(
+                hist_data,
+                title=f"{ticker} - Graphique en bougies",
+                show_volume=True
+            )
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Données brutes
-        with st.expander("📊 Données détaillées"):
-            st.dataframe(hist_data.tail(10), use_container_width=True)
+        # Dernières données
+        with st.expander("📋 Dernières transactions"):
+            st.dataframe(hist_data.tail(10))
     
     except Exception as e:
-        st.error(f"Erreur: {str(e)}")
-        st.code(traceback.format_exc())
+        st.error(f"Erreur: {e}")
         show_demo_mode()
-
-def show_demo_mode():
-    """Affiche une version démo avec des données simulées"""
-    st.info("Mode démonstration - Données simulées")
-    
-    # Générer des données de démo
-    hist_data = get_mock_data()
-    
-    # Métriques
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("SBER", "280.50 ₽", "+5.20 (1.9%)")
-    with col2:
-        st.metric("GAZP", "165.80 ₽", "-2.30 (-1.4%)")
-    with col3:
-        st.metric("LKOH", "7200.50 ₽", "+120.50 (1.7%)")
-    with col4:
-        st.metric("YNDX", "2850.00 ₽", "+50.00 (1.8%)")
-    
-    # Graphique de démo
-    fig = create_price_chart(hist_data, title="Données simulées")
-    st.plotly_chart(fig, use_container_width=True)
-    
-    st.markdown("""
-    ### 🔧 Pour utiliser les données réelles :
-    1. Vérifiez que le client API est correctement configuré
-    2. Assurez-vous que le symbole existe (SBER, GAZP, LKOH, etc.)
-    3. Réessayez plus tard
-    """)
