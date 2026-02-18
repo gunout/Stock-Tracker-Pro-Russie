@@ -2,10 +2,10 @@
 Package des pages
 """
 __all__ = [
-    '1_tableau_de_bord',
-    '2_portefeuille',
-    '3_alertes',
-    '4_indices',
-    '5_predictions',
-    '6_configuration'
+    'page_tableau_de_bord',
+    'page_portefeuille',
+    'page_alertes',
+    'page_indices',
+    'page_predictions',
+    'page_configuration'
 ]
