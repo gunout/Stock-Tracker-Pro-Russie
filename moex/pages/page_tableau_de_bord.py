@@ -1,35 +1,124 @@
 """
-Page Tableau de bord - Version complète
+Page Tableau de bord - Version autonome sans dépendances externes
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import sys
-from pathlib import Path
+import plotly.graph_objs as go
 
-# Ajouter le chemin racine
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Pas d'imports externes - tout est défini dans ce fichier
 
-# Imports nécessaires
-try:
-    from src.api.moex_client import MOEXClient
-    from src.visualization.charts import create_price_chart, create_candle_chart
-    from src.utils.formatters import format_currency
-    IMPORTS_OK = True
-except ImportError as e:
-    st.error(f"Erreur d'import: {e}")
-    IMPORTS_OK = False
+def create_price_chart(df, title="Évolution du prix", show_volume=True):
+    """
+    Crée un graphique de prix en ligne - Défini localement
+    """
+    fig = go.Figure()
+    
+    # Prix
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['Close'],
+        mode='lines',
+        name='Prix',
+        line=dict(color='#D52B1E', width=2)
+    ))
+    
+    # Volume
+    if show_volume and 'Volume' in df.columns:
+        fig.add_trace(go.Bar(
+            x=df.index,
+            y=df['Volume'],
+            name='Volume',
+            yaxis='y2',
+            marker=dict(color='lightgray', opacity=0.3)
+        ))
+    
+    fig.update_layout(
+        title=title,
+        yaxis_title="Prix (₽)",
+        yaxis2=dict(
+            title="Volume",
+            overlaying='y',
+            side='right',
+            showgrid=False
+        ),
+        xaxis_title="Date",
+        height=500,
+        hovermode='x unified',
+        template='plotly_white'
+    )
+    
+    return fig
+
+def create_candle_chart(df, title="Graphique en bougies", show_volume=True):
+    """
+    Crée un graphique en bougies - Défini localement
+    """
+    fig = go.Figure()
+    
+    # Bougies
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close'],
+        name='Bougies',
+        increasing_line_color='#0039A6',
+        decreasing_line_color='#D52B1E'
+    ))
+    
+    # Volume
+    if show_volume and 'Volume' in df.columns:
+        colors = ['#0039A6' if df['Close'].iloc[i] >= df['Open'].iloc[i] 
+                  else '#D52B1E' for i in range(len(df))]
+        
+        fig.add_trace(go.Bar(
+            x=df.index,
+            y=df['Volume'],
+            name='Volume',
+            yaxis='y2',
+            marker=dict(color=colors, opacity=0.3)
+        ))
+    
+    fig.update_layout(
+        title=title,
+        yaxis_title="Prix (₽)",
+        yaxis2=dict(
+            title="Volume",
+            overlaying='y',
+            side='right',
+            showgrid=False
+        ),
+        xaxis_title="Date",
+        height=500,
+        hovermode='x unified',
+        template='plotly_white',
+        xaxis_rangeslider_visible=False
+    )
+    
+    return fig
+
+def format_currency(value):
+    """Formate une valeur monétaire"""
+    if value is None:
+        return "N/A"
+    if value >= 1e9:
+        return f"₽{value/1e9:.2f} млрд"
+    elif value >= 1e6:
+        return f"₽{value/1e6:.2f} млн"
+    else:
+        return f"₽{value:,.2f}"
 
 def generate_demo_data():
     """Génère des données de démonstration"""
-    np.random.seed(42)  # Pour des résultats reproductibles
+    np.random.seed(42)
     dates = pd.date_range(end=datetime.now(), periods=100, freq='D')
     
     # Générer des prix avec une tendance
-    base = 100
     returns = np.random.randn(100) * 0.02
-    prices = base * (1 + np.cumsum(returns))
+    prices = 100 * (1 + np.cumsum(returns))
     
     return pd.DataFrame({
         'Open': prices * 0.99,
@@ -57,14 +146,12 @@ def show_demo_mode():
     # Graphique de démo
     hist_data = generate_demo_data()
     
-    # Vérifier que create_price_chart est disponible
-    if 'create_price_chart' in globals():
-        fig = create_price_chart(hist_data, title="Données simulées - Évolution")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        # Fallback: graphique simple avec Streamlit
-        st.subheader("Évolution simulée")
-        st.line_chart(hist_data['Close'])
+    # Utiliser la fonction locale
+    fig = create_price_chart(hist_data, title="Données simulées - Évolution")
+    st.plotly_chart(fig, use_container_width=True)
+    
+    with st.expander("📊 Données simulées"):
+        st.dataframe(hist_data.tail(10))
     
     with st.expander("ℹ️ Informations"):
         st.markdown("""
@@ -74,16 +161,64 @@ def show_demo_mode():
         - Vérifiez votre connexion internet
         """)
 
+def get_moex_data(ticker, days=30):
+    """Tente de récupérer des données MOEX réelles"""
+    import requests
+    
+    url = f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json"
+    
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    
+    params = {
+        'from': start.strftime('%Y-%m-%d'),
+        'till': end.strftime('%Y-%m-%d'),
+        'interval': 24,
+        'limit': 100,
+        'iss.meta': 'off'
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        if 'candles' in data and 'data' in data['candles']:
+            candles = data['candles']
+            
+            # Extraire les colonnes
+            if 'columns' in candles:
+                columns = candles['columns']
+                # Si columns est une liste de dictionnaires
+                if columns and isinstance(columns[0], dict):
+                    columns = [col['name'] for col in columns]
+                
+                df = pd.DataFrame(candles['data'], columns=columns)
+                
+                if 'begin' in df.columns:
+                    df['begin'] = pd.to_datetime(df['begin'])
+                    df.set_index('begin', inplace=True)
+                
+                # Renommer pour standardiser
+                rename = {
+                    'open': 'Open',
+                    'high': 'High',
+                    'low': 'Low',
+                    'close': 'Close',
+                    'volume': 'Volume'
+                }
+                df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+                
+                return df
+    
+    except Exception as e:
+        st.warning(f"Erreur API: {e}")
+    
+    return None
+
 def show():
     """Fonction principale de la page"""
     
     st.markdown("# 📈 Tableau de bord MOEX")
-    
-    # Vérification des imports
-    if not IMPORTS_OK:
-        st.error("Erreur de configuration - Mode démo uniquement")
-        show_demo_mode()
-        return
     
     # Sidebar dans la page
     with st.sidebar:
@@ -104,41 +239,27 @@ def show():
             horizontal=True
         )
         
-        use_demo = st.checkbox("Forcer mode démo", value=False)
+        use_demo = st.checkbox("Mode démo", value=False)
     
     # Mode démo forcé
     if use_demo:
         show_demo_mode()
         return
     
-    # Mode réel
-    try:
-        client = MOEXClient()
-        
-        # Conversion de la période
-        period_days = {"7j": 7, "30j": 30, "90j": 90, "180j": 180, "365j": 365}
-        days = period_days.get(period, 30)
-        
-        with st.spinner(f"Chargement des données pour {ticker}..."):
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days)
-            
-            hist_data = client.get_candles(
-                ticker,
-                from_date=start_date.strftime('%Y-%m-%d'),
-                to_date=end_date.strftime('%Y-%m-%d')
-            )
-            
-            market_data = client.get_market_data(ticker)
-        
-        if hist_data.empty:
-            st.warning(f"Pas de données pour {ticker}")
-            show_demo_mode()
-            return
+    # Essayer de charger les données réelles
+    period_days = {"7j": 7, "30j": 30, "90j": 90, "180j": 180, "365j": 365}
+    days = period_days.get(period, 30)
+    
+    with st.spinner(f"Chargement des données pour {ticker}..."):
+        df = get_moex_data(ticker, days)
+    
+    if df is not None and not df.empty:
+        # Succès - afficher les données réelles
+        st.success(f"✅ Données réelles pour {ticker}")
         
         # Métriques
-        current = hist_data['Close'].iloc[-1]
-        prev = hist_data['Close'].iloc[-2] if len(hist_data) > 1 else current
+        current = df['Close'].iloc[-1]
+        prev = df['Close'].iloc[-2] if len(df) > 1 else current
         change = current - prev
         change_pct = (change / prev * 100) if prev != 0 else 0
         
@@ -146,42 +267,32 @@ def show():
         with col1:
             st.metric(
                 "Prix",
-                f"{current:,.2f} ₽",
+                format_currency(current),
                 delta=f"{change:+.2f} ({change_pct:+.1f}%)"
             )
         
         with col2:
-            high = hist_data['High'].max()
-            st.metric("Plus haut", f"{high:,.2f} ₽")
+            st.metric("Plus haut", format_currency(df['High'].max()))
         
         with col3:
-            low = hist_data['Low'].min()
-            st.metric("Plus bas", f"{low:,.2f} ₽")
+            st.metric("Plus bas", format_currency(df['Low'].min()))
         
         with col4:
-            volume = hist_data['Volume'].mean()
-            st.metric("Volume moy", f"{volume/1e6:.1f}M")
+            st.metric("Volume moy", f"{df['Volume'].mean()/1e6:.1f}M")
         
         # Graphique
         if chart_type == "Ligne":
-            fig = create_price_chart(
-                hist_data,
-                title=f"{ticker} - Évolution du prix",
-                show_volume=True
-            )
+            fig = create_price_chart(df, title=f"{ticker} - Évolution du prix")
         else:
-            fig = create_candle_chart(
-                hist_data,
-                title=f"{ticker} - Graphique en bougies",
-                show_volume=True
-            )
+            fig = create_candle_chart(df, title=f"{ticker} - Graphique en bougies")
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Dernières données
-        with st.expander("📋 Dernières transactions"):
-            st.dataframe(hist_data.tail(10))
+        # Données
+        with st.expander("📋 Données détaillées"):
+            st.dataframe(df.tail(10))
     
-    except Exception as e:
-        st.error(f"Erreur: {e}")
+    else:
+        # Échec - passer en mode démo
+        st.warning(f"Impossible de charger les données pour {ticker}")
         show_demo_mode()
