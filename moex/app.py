@@ -1,5 +1,5 @@
 """
-Application principale - Version simplifiée
+Application principale - Version corrigée
 """
 import streamlit as st
 import sys
@@ -15,15 +15,15 @@ st.set_page_config(
 # Ajouter le chemin au PYTHONPATH
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Imports directs des pages (sans emojis dans les noms)
+# Imports des pages (sans chiffres)
 try:
     from pages import (
-        1_tableau_de_bord as tableau_de_bord,
-        2_portefeuille as portefeuille,
-        3_alertes as alertes,
-        4_indices as indices,
-        5_predictions as predictions,
-        6_configuration as configuration
+        page_tableau_de_bord,
+        page_portefeuille,
+        page_alertes,
+        page_indices,
+        page_predictions,
+        page_configuration
     )
     PAGES_OK = True
 except ImportError as e:
@@ -37,7 +37,6 @@ def main():
     with st.sidebar:
         st.markdown("## 🇷🇺 Navigation")
         
-        # Menu sans emojis dans les valeurs (mais affichés)
         page = st.radio(
             "Aller à",
             ["📈 Tableau de bord", 
@@ -55,27 +54,27 @@ def main():
             st.cache_data.clear()
             st.rerun()
     
-    # Vérification des imports
+    # Vérification
     if not PAGES_OK:
-        st.error("Impossible de charger les pages. Vérifiez la structure du dossier pages/")
+        st.error("Impossible de charger les pages")
         return
     
     # Routage
     try:
         if page == "📈 Tableau de bord":
-            tableau_de_bord.show()
+            page_tableau_de_bord.show()
         elif page == "💰 Portefeuille":
-            portefeuille.show()
+            page_portefeuille.show()
         elif page == "🔔 Alertes":
-            alertes.show()
+            page_alertes.show()
         elif page == "📊 Indices":
-            indices.show()
+            page_indices.show()
         elif page == "🤖 Prédictions":
-            predictions.show()
+            page_predictions.show()
         elif page == "⚙️ Configuration":
-            configuration.show()
+            page_configuration.show()
     except Exception as e:
-        st.error(f"Erreur d'affichage: {e}")
+        st.error(f"Erreur: {e}")
         import traceback
         st.code(traceback.format_exc())
 
