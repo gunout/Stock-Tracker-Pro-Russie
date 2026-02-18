@@ -1,90 +1,72 @@
 """
-Point d'entrée principal de l'application Dashboard MOEX
+Point d'entrée principal - Version corrigée
 """
 import streamlit as st
 import os
 import sys
 import logging
 from pathlib import Path
+from datetime import datetime
 
 # Ajouter le chemin racine au PYTHONPATH
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.utils.constants import PAGE_CONFIG
-from src.utils.time_utils import setup_timezone
-from src.utils.session import init_session_state
-from src.api.moex_client import MOEXClient
+# Configuration
+st.set_page_config(
+    page_title="MOEX Dashboard",
+    page_icon="🇷🇺",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Créer les dossiers nécessaires
 os.makedirs('logs', exist_ok=True)
 os.makedirs('cache', exist_ok=True)
 
 # Configuration du logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Configuration de la page Streamlit
-st.set_page_config(**PAGE_CONFIG)
-
-# Import dynamique des pages pour éviter les erreurs d'import
-def load_page(page_name):
+def load_page_module(page_name):
     """Charge dynamiquement un module de page"""
     try:
         if page_name == "📈 Tableau de bord":
-            from pages import tableau_de_bord
-            return tableau_de_bord
+            import pages.tableau_de_bord as module
         elif page_name == "💰 Portefeuille":
-            from pages import portefeuille
-            return portefeuille
+            import pages.portefeuille as module
         elif page_name == "🔔 Alertes":
-            from pages import alertes
-            return alertes
+            import pages.alertes as module
         elif page_name == "📊 Indices":
-            from pages import indices
-            return indices
+            import pages.indices as module
         elif page_name == "🤖 Prédictions":
-            from pages import predictions
-            return predictions
+            import pages.predictions as module
         elif page_name == "⚙️ Configuration":
-            from pages import configuration
-            return configuration
+            import pages.configuration as module
+        else:
+            return None
+        
+        # Vérifier que le module a une fonction show()
+        if hasattr(module, 'show'):
+            return module
+        else:
+            st.error(f"Le module {page_name} n'a pas de fonction show()")
+            return None
+            
     except ImportError as e:
-        logger.error(f"Erreur d'import pour {page_name}: {e}")
+        st.error(f"Erreur d'import pour {page_name}: {e}")
+        st.info(f"Vérifiez que le fichier pages/{page_name.split()[-1].lower()}.py existe")
+        return None
+    except Exception as e:
+        st.error(f"Erreur inattendue: {e}")
         return None
 
 def main():
-    """Fonction principale de l'application"""
-    
-    # Initialisation
-    setup_timezone()
-    init_session_state()
-    
-    # Initialisation du client API
-    if 'moex_client' not in st.session_state:
-        try:
-            st.session_state.moex_client = MOEXClient()
-        except Exception as e:
-            st.error(f"Erreur d'initialisation du client API: {e}")
-            st.session_state.moex_client = None
+    """Fonction principale"""
     
     # Sidebar
     with st.sidebar:
-        st.markdown("""
-        <div style='text-align: center;'>
-            <h1 style='color: #D52B1E;'>🇷🇺 MOEX</h1>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("## 🇷🇺 Navigation")
         
-        st.markdown("---")
-        st.markdown("## Navigation")
-        
-        # Menu principal
+        # Menu
         page = st.radio(
             "Aller à",
             ["📈 Tableau de bord", 
@@ -93,45 +75,44 @@ def main():
              "📊 Indices",
              "🤖 Prédictions",
              "⚙️ Configuration"],
-            label_visibility="collapsed",
-            key="navigation"
+            key="nav"
         )
         
         st.markdown("---")
+        st.caption(f"Heure: {datetime.now().strftime('%H:%M:%S')}")
         
-        # Informations système
-        st.caption(f"Python: {sys.version[:6]}")
-        st.caption(f"Streamlit: {st.__version__}")
-        
-        # Bouton de rafraîchissement
-        if st.button("🔄 Rafraîchir", use_container_width=True):
+        if st.button("🔄 Rafraîchir"):
             st.cache_data.clear()
             st.rerun()
     
-    # Chargement et affichage de la page sélectionnée
-    page_module = load_page(page)
-    if page_module and hasattr(page_module, 'show'):
+    # Charger et afficher la page
+    module = load_page_module(page)
+    
+    if module:
         try:
-            page_module.show()
+            module.show()
         except Exception as e:
-            st.error(f"Erreur lors de l'affichage de la page: {e}")
-            st.exception(e)
+            st.error(f"Erreur lors de l'exécution de la page: {e}")
+            import traceback
+            st.code(traceback.format_exc())
     else:
         st.error(f"Impossible de charger la page: {page}")
-        st.info("Vérifiez que tous les fichiers de pages existent dans le dossier `pages/`")
-    
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        f"""
-        <div style='text-align: center; color: gray; font-size: 0.8rem;'>
-            🇷🇺 Dashboard MOEX - Version 1.0.0<br>
-            {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+        st.info("""
+        **Vérifications :**
+        1. Le dossier `pages/` existe-t-il ?
+        2. Les fichiers `.py` sont-ils présents ?
+        3. Chaque fichier a-t-il une fonction `show()` ?
+        """)
+        
+        # Afficher la structure pour debug
+        pages_dir = Path(__file__).parent / "pages"
+        if pages_dir.exists():
+            files = list(pages_dir.glob("*.py"))
+            st.write("Fichiers trouvés dans pages/:")
+            for f in files:
+                st.write(f"- {f.name}")
+        else:
+            st.error("Le dossier pages/ n'existe pas!")
 
 if __name__ == "__main__":
-    from datetime import datetime
     main()
