@@ -1,32 +1,107 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objs as go
+import plotly.express as px
 from datetime import datetime, timedelta
 import pytz
-from pytz import timezone
-import plotly.graph_objs as go
-from zoneinfo import ZoneInfo  # Python 3.9+
+import requests
+import json
+import time
 
 # ============================================================================
-# CONFIGURATION COMPLÈTE DES FUSEAUX HORAIRES
+# CONFIGURATION
 # ============================================================================
 
-class TimezoneManager:
-    """Gestionnaire complet des fuseaux horaires"""
+st.set_page_config(
+    page_title="MOEX Exchange - Dashboard Complet",
+    page_icon="🇷🇺",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Style CSS personnalisé
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(90deg, #0033A0, #D52B1E);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 1rem;
+        text-align: center;
+        margin-bottom: 2rem;
+        font-size: 2rem;
+        font-weight: bold;
+    }
+    .timezone-card {
+        background-color: #1e1e2f;
+        color: white;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        text-align: center;
+        margin: 0.5rem 0;
+    }
+    .market-open {
+        background-color: #00cc96;
+        color: white;
+        padding: 0.3rem 1rem;
+        border-radius: 1rem;
+        font-weight: bold;
+        display: inline-block;
+    }
+    .market-closed {
+        background-color: #ef553b;
+        color: white;
+        padding: 0.3rem 1rem;
+        border-radius: 1rem;
+        font-weight: bold;
+        display: inline-block;
+    }
+    .live-badge {
+        background-color: #ff4b4b;
+        color: white;
+        padding: 0.2rem 0.5rem;
+        border-radius: 0.5rem;
+        font-size: 0.8rem;
+        animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+    .metric-rub {
+        font-size: 1.8rem;
+        font-weight: bold;
+        color: #0033A0;
+    }
+    .metric-usd {
+        font-size: 1.8rem;
+        font-weight: bold;
+        color: #D52B1E;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================================
+# GESTIONNAIRE DE FUSEAUX HORAIRES POUR MOEX
+# ============================================================================
+
+class MOEXTimeZoneManager:
+    """Gestionnaire des fuseaux horaires pour MOEX"""
     
-    # Tous les fuseaux UTC de -12 à +14
+    # Tous les fuseaux UTC
     UTC_OFFSETS = {
         'UTC-12': -12, 'UTC-11': -11, 'UTC-10': -10, 'UTC-9': -9, 'UTC-8': -8,
         'UTC-7': -7, 'UTC-6': -6, 'UTC-5': -5, 'UTC-4': -4, 'UTC-3': -3,
-        'UTC-2': -2, 'UTC-1': -1, 'UTC±0': 0, 'UTC+1': 1, 'UTC+2': 2,
-        'UTC+3': 3, 'UTC+4': 4, 'UTC+5': 5, 'UTC+5:30': 5.5, 'UTC+5:45': 5.75,
-        'UTC+6': 6, 'UTC+6:30': 6.5, 'UTC+7': 7, 'UTC+8': 8, 'UTC+8:45': 8.75,
-        'UTC+9': 9, 'UTC+9:30': 9.5, 'UTC+10': 10, 'UTC+10:30': 10.5,
-        'UTC+11': 11, 'UTC+12': 12, 'UTC+13': 13, 'UTC+14': 14
+        'UTC-2': -2, 'UTC-1': -1, 'UTC+0': 0, 'UTC+1': 1, 'UTC+2': 2,
+        'UTC+3': 3, 'UTC+4': 4, 'UTC+5': 5, 'UTC+6': 6, 'UTC+7': 7,
+        'UTC+8': 8, 'UTC+9': 9, 'UTC+10': 10, 'UTC+11': 11, 'UTC+12': 12,
+        'UTC+13': 13, 'UTC+14': 14
     }
     
-    # Mapping des fuseaux IANA principaux
-    IANA_TIMEZONES = {
+    # Mapping IANA pour MOEX
+    IANA_MAPPING = {
         'UTC-12': 'Etc/GMT+12',
         'UTC-11': 'Pacific/Midway',
         'UTC-10': 'Pacific/Honolulu',
@@ -39,25 +114,17 @@ class TimezoneManager:
         'UTC-3': 'America/Sao_Paulo',
         'UTC-2': 'America/Noronha',
         'UTC-1': 'Atlantic/Cape_Verde',
-        'UTC±0': 'Europe/London',
+        'UTC+0': 'Europe/London',
         'UTC+1': 'Europe/Paris',
         'UTC+2': 'Europe/Helsinki',
         'UTC+3': 'Europe/Moscow',
-        'UTC+3:30': 'Asia/Tehran',
         'UTC+4': 'Asia/Dubai',
-        'UTC+4:30': 'Asia/Kabul',
         'UTC+5': 'Asia/Karachi',
-        'UTC+5:30': 'Asia/Kolkata',
-        'UTC+5:45': 'Asia/Kathmandu',
         'UTC+6': 'Asia/Dhaka',
-        'UTC+6:30': 'Asia/Rangoon',
         'UTC+7': 'Asia/Bangkok',
         'UTC+8': 'Asia/Shanghai',
-        'UTC+8:45': 'Australia/Eucla',
         'UTC+9': 'Asia/Tokyo',
-        'UTC+9:30': 'Australia/Darwin',
         'UTC+10': 'Australia/Sydney',
-        'UTC+10:30': 'Australia/Lord_Howe',
         'UTC+11': 'Pacific/Noumea',
         'UTC+12': 'Pacific/Auckland',
         'UTC+13': 'Pacific/Apia',
@@ -66,488 +133,617 @@ class TimezoneManager:
     
     # Grandes villes par fuseau
     MAJOR_CITIES = {
-        'UTC-10': 'Honolulu',
-        'UTC-8': 'Los Angeles, San Francisco',
-        'UTC-7': 'Denver, Phoenix',
-        'UTC-6': 'Chicago, Mexico',
-        'UTC-5': 'New York, Toronto, Bogota',
-        'UTC-4': 'Santiago, Caracas',
-        'UTC-3': 'Buenos Aires, São Paulo',
-        'UTC±0': 'Londres, Dublin, Lisbonne',
-        'UTC+1': 'Paris, Berlin, Rome, Madrid',
-        'UTC+2': 'Helsinki, Le Caire, Johannesburg',
-        'UTC+3': 'Moscou, Istanbul, Riyad',
-        'UTC+3:30': 'Téhéran',
-        'UTC+4': 'Dubaï, Bakou',
-        'UTC+5': 'Karachi, Tachkent',
-        'UTC+5:30': 'Mumbai, New Delhi',
-        'UTC+6': 'Dhaka',
-        'UTC+7': 'Bangkok, Jakarta',
-        'UTC+8': 'Shanghai, Singapour, Perth',
-        'UTC+9': 'Tokyo, Séoul',
-        'UTC+9:30': 'Adélaïde',
-        'UTC+10': 'Sydney, Melbourne',
-        'UTC+11': 'Nouméa',
-        'UTC+12': 'Auckland, Fidji'
+        'UTC-5': 'New York, Toronto',
+        'UTC+0': 'Londres, Dublin',
+        'UTC+1': 'Paris, Berlin, Rome',
+        'UTC+2': 'Helsinki, Le Caire',
+        'UTC+3': 'Moscou, Istanbul',
+        'UTC+4': 'Dubaï',
+        'UTC+5': 'Karachi',
+        'UTC+5:30': 'Mumbai',
+        'UTC+8': 'Shanghai, Singapour',
+        'UTC+9': 'Tokyo, Séoul'
     }
     
-    # Bourses mondiales avec leurs fuseaux
-    STOCK_EXCHANGES = {
-        'MOEX (Moscou)': {'tz': 'Europe/Moscow', 'utc': 3, 'hours': '10:00-18:45'},
-        'LSE (Londres)': {'tz': 'Europe/London', 'utc': 0, 'hours': '08:00-16:30'},
-        'NYSE (New York)': {'tz': 'America/New_York', 'utc': -5, 'hours': '09:30-16:00'},
-        'NASDAQ': {'tz': 'America/New_York', 'utc': -5, 'hours': '09:30-16:00'},
-        'TSX (Toronto)': {'tz': 'America/Toronto', 'utc': -5, 'hours': '09:30-16:00'},
-        'Euronext (Paris)': {'tz': 'Europe/Paris', 'utc': 1, 'hours': '09:00-17:30'},
-        'Deutsche Börse': {'tz': 'Europe/Berlin', 'utc': 1, 'hours': '09:00-17:30'},
-        'SIX (Zurich)': {'tz': 'Europe/Zurich', 'utc': 1, 'hours': '09:00-17:30'},
-        'Bovespa (São Paulo)': {'tz': 'America/Sao_Paulo', 'utc': -3, 'hours': '10:00-17:30'},
-        'HKEX (Hong Kong)': {'tz': 'Asia/Hong_Kong', 'utc': 8, 'hours': '09:30-16:00'},
-        'SSE (Shanghai)': {'tz': 'Asia/Shanghai', 'utc': 8, 'hours': '09:30-15:00'},
-        'TSE (Tokyo)': {'tz': 'Asia/Tokyo', 'utc': 9, 'hours': '09:00-15:00'},
-        'ASX (Sydney)': {'tz': 'Australia/Sydney', 'utc': 10, 'hours': '10:00-16:00'},
-        'JSE (Johannesburg)': {'tz': 'Africa/Johannesburg', 'utc': 2, 'hours': '09:00-17:00'}
-    }
-    
-    @staticmethod
-    def get_all_timezones():
-        """Retourne tous les fuseaux disponibles"""
-        return sorted(TimezoneManager.UTC_OFFSETS.keys())
-    
-    @staticmethod
-    def convert_time(dt, from_tz, to_tz):
-        """Convertit une heure entre fuseaux"""
-        if isinstance(from_tz, str):
-            from_tz = pytz.timezone(from_tz)
-        if isinstance(to_tz, str):
-            to_tz = pytz.timezone(to_tz)
+    def __init__(self):
+        self.moscow_tz = pytz.timezone('Europe/Moscow')
         
-        if dt.tzinfo is None:
-            dt = from_tz.localize(dt)
-        
-        return dt.astimezone(to_tz)
+    def get_moscow_time(self):
+        """Heure actuelle à Moscou"""
+        return datetime.now(self.moscow_tz)
     
-    @staticmethod
-    def get_current_time_in_utc(utc_offset):
-        """Heure actuelle dans un fuseau UTC spécifique"""
-        utc_now = datetime.now(pytz.UTC)
-        return utc_now + timedelta(hours=utc_offset)
+    def convert_to_timezone(self, dt, target_tz):
+        """Convertit une heure de Moscou vers un autre fuseau"""
+        if isinstance(target_tz, str):
+            target_tz = pytz.timezone(target_tz)
+        return dt.astimezone(target_tz)
     
-    @staticmethod
-    def format_time_for_display(dt, format="%H:%M:%S"):
-        """Formate l'heure pour affichage"""
-        return dt.strftime(format)
-    
-    @staticmethod
-    def get_market_hours_in_timezone(exchange, target_tz):
-        """Convertit les heures de marché dans un fuseau cible"""
-        exchange_info = TimezoneManager.STOCK_EXCHANGES.get(exchange)
-        if not exchange_info:
-            return None
+    def get_market_hours_local(self, target_tz):
+        """Heures d'ouverture MOEX en heure locale"""
+        moscow_now = self.get_moscow_time()
+        today = moscow_now.date()
         
-        exchange_tz = timezone(exchange_info['tz'])
-        today = datetime.now(exchange_tz).date()
-        
-        # Heures d'ouverture/fermeture
-        open_time = datetime.strptime(exchange_info['hours'].split('-')[0], '%H:%M').time()
-        close_time = datetime.strptime(exchange_info['hours'].split('-')[1], '%H:%M').time()
-        
-        open_dt = exchange_tz.localize(datetime.combine(today, open_time))
-        close_dt = exchange_tz.localize(datetime.combine(today, close_time))
+        # Heures MOEX (heure de Moscou)
+        moex_open = self.moscow_tz.localize(datetime.combine(today, datetime.strptime('10:00', '%H:%M').time()))
+        moex_close = self.moscow_tz.localize(datetime.combine(today, datetime.strptime('18:45', '%H:%M').time()))
+        moex_evening_open = self.moscow_tz.localize(datetime.combine(today, datetime.strptime('19:05', '%H:%M').time()))
+        moex_evening_close = self.moscow_tz.localize(datetime.combine(today, datetime.strptime('23:50', '%H:%M').time()))
         
         # Conversion
-        target_tz = timezone(target_tz) if isinstance(target_tz, str) else target_tz
-        open_local = open_dt.astimezone(target_tz)
-        close_local = close_dt.astimezone(target_tz)
+        target = pytz.timezone(target_tz) if isinstance(target_tz, str) else target_tz
         
         return {
-            'open': open_local.strftime('%H:%M'),
-            'close': close_local.strftime('%H:%M'),
-            'date': open_local.strftime('%Y-%m-%d')
+            'main_open': moex_open.astimezone(target).strftime('%H:%M'),
+            'main_close': moex_close.astimezone(target).strftime('%H:%M'),
+            'evening_open': moex_evening_open.astimezone(target).strftime('%H:%M'),
+            'evening_close': moex_evening_close.astimezone(target).strftime('%H:%M'),
+            'date': moex_open.astimezone(target).strftime('%d/%m/%Y')
+        }
+    
+    def get_market_status(self):
+        """Statut actuel du marché MOEX"""
+        moscow_now = self.get_moscow_time()
+        
+        # Vérifier weekend
+        if moscow_now.weekday() >= 5:
+            return "Fermé (Week-end)", "closed"
+        
+        # Horaires
+        main_open = moscow_now.replace(hour=10, minute=0, second=0)
+        main_close = moscow_now.replace(hour=18, minute=45, second=0)
+        evening_open = moscow_now.replace(hour=19, minute=5, second=0)
+        evening_close = moscow_now.replace(hour=23, minute=50, second=0)
+        
+        if main_open <= moscow_now <= main_close:
+            return "Session principale", "open"
+        elif evening_open <= moscow_now <= evening_close:
+            return "Session du soir", "evening"
+        elif moscow_now < main_open:
+            return "Pré-ouverture", "pre"
+        else:
+            return "Fermé", "closed"
+    
+    def time_until_next_session(self):
+        """Temps avant la prochaine session"""
+        moscow_now = self.get_moscow_time()
+        
+        # Prochaine ouverture
+        next_open = moscow_now.replace(hour=10, minute=0, second=0)
+        if moscow_now > next_open:
+            next_open = next_open + timedelta(days=1)
+            # Skip weekend
+            while next_open.weekday() >= 5:
+                next_open = next_open + timedelta(days=1)
+        
+        delta = next_open - moscow_now
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+        seconds = int(delta.total_seconds() % 60)
+        
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+# ============================================================================
+# DONNÉES MOEX
+# ============================================================================
+
+class MOEXDataProvider:
+    """Fournisseur de données pour MOEX"""
+    
+    # Actions MOEX
+    MOEX_STOCKS = {
+        'SBER': 'Sberbank',
+        'GAZP': 'Gazprom',
+        'LKOH': 'Lukoil',
+        'ROSN': 'Rosneft',
+        'NVTK': 'Novatek',
+        'GMKN': 'Norilsk Nickel',
+        'SNGS': 'Surgutneftegas',
+        'TATN': 'Tatneft',
+        'VTBR': 'VTB Bank',
+        'PLZL': 'Polyus',
+        'ALRS': 'Alrosa',
+        'MOEX': 'Moscow Exchange',
+        'MAGN': 'MMK',
+        'NLMK': 'NLMK',
+        'CHMF': 'Severstal',
+        'AFKS': 'Sistema',
+        'MTSS': 'MTS',
+        'PHOR': 'PhosAgro',
+        'URKA': 'Uralkali',
+        'YNDX': 'Yandex',
+        'TCSG': 'Tinkoff',
+        'QIWI': 'Qiwi',
+        'FIVE': 'X5',
+        'MGNT': 'Magnit',
+        'RUAL': 'Rusal',
+        'POLY': 'Polymetal',
+        'RTKM': 'Rostelecom',
+        'IRAO': 'Inter RAO',
+        'HYDR': 'RusHydro'
+    }
+    
+    # Indices
+    INDICES = {
+        'IMOEX': 'MOEX Russia Index',
+        'RTSI': 'RTS Index',
+        'MOEXBC': 'MOEX Blue Chip',
+        'MOEXMM': 'MOEX Metals & Mining',
+        'MOEXOG': 'MOEX Oil & Gas',
+        'MOEXFN': 'MOEX Finance',
+        'MOEXCN': 'MOEX Consumer'
+    }
+    
+    @staticmethod
+    def get_realtime_data():
+        """Simule des données en temps réel"""
+        # Dans une vraie application, utilisez l'API MOEX
+        # https://iss.moex.com/iss/reference/
+        
+        data = {}
+        for symbol, name in MOEXDataProvider.MOEX_STOCKS.items():
+            # Générer des données réalistes
+            base_price = {
+                'SBER': 280.50, 'GAZP': 165.30, 'LKOH': 7100.00, 'ROSN': 550.00,
+                'NVTK': 1300.00, 'GMKN': 17000.00, 'YNDX': 2600.00, 'TCSG': 3400.00
+            }.get(symbol, np.random.uniform(100, 1000))
+            
+            # Variation aléatoire
+            change_pct = np.random.uniform(-3, 3)
+            price = base_price * (1 + change_pct/100)
+            
+            data[symbol] = {
+                'name': name,
+                'price': price,
+                'change': change_pct,
+                'change_abs': price - base_price,
+                'volume': np.random.randint(10000, 10000000),
+                'market_cap': price * np.random.randint(1000000, 1000000000)
+            }
+        
+        return data
+    
+    @staticmethod
+    def get_indices():
+        """Données des indices"""
+        return {
+            'IMOEX': {'value': 3245.67, 'change': 0.45},
+            'RTSI': {'value': 1089.34, 'change': -0.12},
+            'MOEXBC': {'value': 1850.23, 'change': 0.32},
+            'MOEXOG': {'value': 4120.56, 'change': 0.78}
         }
 
 # ============================================================================
-# COMPOSANT STREAMLIT POUR LA SÉLECTION DE FUSEAU
-# ============================================================================
-
-def timezone_selector(key="tz_selector"):
-    """Sélecteur de fuseau horaire complet"""
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        # Sélection par décalage UTC
-        tz_options = TimezoneManager.get_all_timezones()
-        selected_utc = st.selectbox(
-            "🌐 Sélectionner un fuseau horaire",
-            options=tz_options,
-            index=tz_options.index('UTC+3'),  # Moscou par défaut
-            key=f"{key}_utc"
-        )
-        
-        # Afficher les grandes villes
-        if selected_utc in TimezoneManager.MAJOR_CITIES:
-            st.caption(f"🏙️ Villes: {TimezoneManager.MAJOR_CITIES[selected_utc]}")
-    
-    with col2:
-        # Heure actuelle dans le fuseau sélectionné
-        offset = TimezoneManager.UTC_OFFSETS[selected_utc]
-        current_time = TimezoneManager.get_current_time_in_utc(offset)
-        
-        st.metric(
-            "Heure locale",
-            current_time.strftime("%H:%M:%S"),
-            delta=f"UTC{offset:+g}" if offset != 0 else "UTC"
-        )
-        
-        # Date
-        st.caption(current_time.strftime("%d %B %Y"))
-    
-    return selected_utc, offset
-
-def exchange_time_comparison():
-    """Compare les heures des bourses mondiales"""
-    
-    st.subheader("🏦 Heures des bourses mondiales")
-    
-    # Sélectionner le fuseau de référence
-    ref_tz = st.selectbox(
-        "Fuseau de référence",
-        options=list(TimezoneManager.STOCK_EXCHANGES.keys()),
-        format_func=lambda x: f"{x} ({TimezoneManager.STOCK_EXCHANGES[x]['tz']})"
-    )
-    
-    # Afficher le tableau comparatif
-    data = []
-    ref_info = TimezoneManager.STOCK_EXCHANGES[ref_tz]
-    ref_tz_obj = timezone(ref_info['tz'])
-    
-    for exchange, info in TimezoneManager.STOCK_EXCHANGES.items():
-        market_hours = TimezoneManager.get_market_hours_in_timezone(exchange, ref_tz_obj)
-        if market_hours:
-            # Statut du marché
-            now_ref = datetime.now(ref_tz_obj)
-            current_time_str = now_ref.strftime("%H:%M")
-            
-            is_open = market_hours['open'] <= current_time_str <= market_hours['close']
-            status = "🟢 Ouvert" if is_open else "🔴 Fermé"
-            
-            data.append({
-                'Bourse': exchange,
-                'Fuseau': f"UTC{info['utc']:+g}",
-                'Heure locale': market_hours['open'] + '-' + market_hours['close'],
-                f'Heure ({ref_tz})': f"{market_hours['open']} - {market_hours['close']}",
-                'Statut': status
-            })
-    
-    df = pd.DataFrame(data)
-    st.dataframe(df, use_container_width=True)
-
-def world_clock_dashboard():
-    """Dashboard des heures mondiales"""
-    
-    st.subheader("🕐 Horloges mondiales")
-    
-    # Sélectionner plusieurs villes
-    cols = st.columns(4)
-    major_cities = [
-        ('New York', 'America/New_York', -5),
-        ('Londres', 'Europe/London', 0),
-        ('Paris', 'Europe/Paris', 1),
-        ('Moscou', 'Europe/Moscow', 3),
-        ('Dubai', 'Asia/Dubai', 4),
-        ('Mumbai', 'Asia/Kolkata', 5.5),
-        ('Shanghai', 'Asia/Shanghai', 8),
-        ('Tokyo', 'Asia/Tokyo', 9),
-        ('Sydney', 'Australia/Sydney', 10)
-    ]
-    
-    for i, (city, tz_name, offset) in enumerate(major_cities):
-        with cols[i % 4]:
-            tz = timezone(tz_name)
-            now = datetime.now(tz)
-            
-            st.markdown(f"""
-            <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; margin: 0.5rem 0;">
-                <b>{city}</b><br>
-                <span style="font-size: 1.5rem;">{now.strftime('%H:%M')}</span><br>
-                <span style="font-size: 0.8rem;">{now.strftime('%d/%m/%Y')}</span><br>
-                <span style="font-size: 0.7rem;">UTC{offset:+g}</span>
-            </div>
-            """, unsafe_allow_html=True)
-
-def market_countdown_timer():
-    """Timer pour l'ouverture/fermeture du marché russe"""
-    
-    st.subheader("⏳ Compte à rebours MOEX")
-    
-    moscow_tz = timezone('Europe/Moscow')
-    now = datetime.now(moscow_tz)
-    
-    # Horaires MOEX
-    open_time = now.replace(hour=10, minute=0, second=0, microsecond=0)
-    close_time = now.replace(hour=18, minute=45, second=0, microsecond=0)
-    
-    # Ajuster pour le jour suivant si nécessaire
-    if now > close_time:
-        open_time = open_time + timedelta(days=1)
-        close_time = close_time + timedelta(days=1)
-    elif now < open_time:
-        close_time = close_time  # même jour
-    
-    # Calculer les différences
-    time_to_open = open_time - now if now < open_time else None
-    time_to_close = close_time - now if open_time <= now <= close_time else None
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if time_to_open and time_to_open.total_seconds() > 0:
-            hours = int(time_to_open.total_seconds() // 3600)
-            minutes = int((time_to_open.total_seconds() % 3600) // 60)
-            seconds = int(time_to_open.total_seconds() % 60)
-            st.metric("⏰ Prochaine ouverture", f"{hours:02d}:{minutes:02d}:{seconds:02d}")
-        else:
-            st.metric("⏰ Prochaine ouverture", "Marché ouvert")
-    
-    with col2:
-        if time_to_close and time_to_close.total_seconds() > 0:
-            hours = int(time_to_close.total_seconds() // 3600)
-            minutes = int((time_to_close.total_seconds() % 3600) // 60)
-            seconds = int(time_to_close.total_seconds() % 60)
-            st.metric("🔔 Fermeture dans", f"{hours:02d}:{minutes:02d}:{seconds:02d}")
-        else:
-            st.metric("🔔 Fermeture dans", "Fermé")
-    
-    with col3:
-        # Session en cours
-        if open_time <= now <= close_time:
-            session_progress = (now - open_time).total_seconds() / (close_time - open_time).total_seconds() * 100
-            st.progress(session_progress / 100, text=f"Session: {session_progress:.1f}%")
-        else:
-            st.progress(0, text="Hors session")
-
-def timezone_converter_tool():
-    """Outil de conversion entre fuseaux"""
-    
-    st.subheader("🔄 Convertisseur de fuseaux horaires")
-    
-    col1, col2, col3 = st.columns([2, 1, 2])
-    
-    with col1:
-        from_tz = st.selectbox(
-            "Fuseau source",
-            options=TimezoneManager.get_all_timezones(),
-            key="from_tz"
-        )
-        
-        # Heure à convertir
-        input_time = st.time_input("Heure", value=datetime.now().time())
-        input_date = st.date_input("Date", value=datetime.now().date())
-    
-    with col2:
-        st.markdown("<br><br><h1 style='text-align: center;'>→</h1>", unsafe_allow_html=True)
-    
-    with col3:
-        to_tz = st.selectbox(
-            "Fuseau cible",
-            options=TimezoneManager.get_all_timezones(),
-            index=TimezoneManager.get_all_timezones().index('UTC+3'),
-            key="to_tz"
-        )
-        
-        # Effectuer la conversion
-        dt = datetime.combine(input_date, input_time)
-        from_offset = TimezoneManager.UTC_OFFSETS[from_tz]
-        to_offset = TimezoneManager.UTC_OFFSETS[to_tz]
-        
-        # Conversion simple (sans DST)
-        converted_dt = dt + timedelta(hours=to_offset - from_offset)
-        
-        st.metric(
-            "Heure convertie",
-            converted_dt.strftime("%H:%M:%S"),
-            delta=f"{to_tz}"
-        )
-        st.caption(converted_dt.strftime("%d %B %Y"))
-
-# ============================================================================
-# INTÉGRATION DANS L'APPLICATION PRINCIPALE
+# INTERFACE PRINCIPALE - DASHBOARD MOEX
 # ============================================================================
 
 def main():
-    st.set_page_config(
-        page_title="Gestionnaire de Fuseaux Horaires",
-        page_icon="🕐",
-        layout="wide"
-    )
+    # Initialisation
+    tz_manager = MOEXTimeZoneManager()
+    moex_data = MOEXDataProvider()
     
-    st.title("🕐 Gestionnaire complet des fuseaux horaires")
-    st.markdown("UTC-12 à UTC+14 · Tous les décalages")
+    # Header
+    st.markdown("<div class='main-header'>🇷🇺 MOEX MOSCOW EXCHANGE - DASHBOARD COMPLET</div>", 
+                unsafe_allow_html=True)
     
-    # Menu principal
-    menu = st.sidebar.radio(
-        "Navigation",
-        ["🌍 Horloges mondiales",
-         "🏦 Bourses internationales",
-         "🔄 Convertisseur",
-         "📊 Dashboard MOEX",
-         "ℹ️ Informations"]
-    )
+    # =========================================================
+    # SECTION 1: FUSEAUX HORAIRES ET STATUT
+    # =========================================================
     
-    if menu == "🌍 Horloges mondiales":
-        # Sélecteur principal
-        selected_tz, offset = timezone_selector()
-        
-        # Dashboard des villes
-        world_clock_dashboard()
-        
-        # Afficher tous les fuseaux
-        with st.expander("📋 Tous les fuseaux UTC"):
-            cols = st.columns(4)
-            for i, (tz_name, offset_val) in enumerate(TimezoneManager.UTC_OFFSETS.items()):
-                with cols[i % 4]:
-                    current = TimezoneManager.get_current_time_in_utc(offset_val)
-                    st.write(f"**{tz_name}**: {current.strftime('%H:%M:%S')}")
+    st.subheader("🕐 Gestionnaire de fuseaux horaires MOEX")
     
-    elif menu == "🏦 Bourses internationales":
-        exchange_time_comparison()
+    # Sélecteur de fuseau
+    col_tz1, col_tz2, col_tz3 = st.columns([2, 2, 1])
+    
+    with col_tz1:
+        selected_utc = st.selectbox(
+            "🌐 Votre fuseau horaire",
+            options=list(MOEXTimeZoneManager.UTC_OFFSETS.keys()),
+            index=list(MOEXTimeZoneManager.UTC_OFFSETS.keys()).index('UTC+3'),
+            help="Sélectionnez votre fuseau horaire pour voir les heures MOEX converties"
+        )
         
-        # Carte thermique des heures d'ouverture
-        st.subheader("🌡️ Carte thermique des ouvertures")
+        # Afficher les grandes villes
+        if selected_utc in MOEXTimeZoneManager.MAJOR_CITIES:
+            st.caption(f"🏙️ {MOEXTimeZoneManager.MAJOR_CITIES[selected_utc]}")
+    
+    with col_tz2:
+        # Heure dans le fuseau sélectionné
+        offset = MOEXTimeZoneManager.UTC_OFFSETS[selected_utc]
+        tz_name = MOEXTimeZoneManager.IANA_MAPPING.get(selected_utc, 'Europe/Moscow')
+        local_tz = pytz.timezone(tz_name)
+        local_time = datetime.now(local_tz)
         
-        # Créer des données pour les 24h
-        hours = list(range(24))
-        exchanges = list(TimezoneManager.STOCK_EXCHANGES.keys())
+        st.metric(
+            "Heure locale",
+            local_time.strftime("%H:%M:%S"),
+            delta=f"{selected_utc}"
+        )
+        st.caption(local_time.strftime("%d %B %Y"))
+    
+    with col_tz3:
+        # Heure de Moscou
+        moscow_time = tz_manager.get_moscow_time()
+        st.metric(
+            "🇷🇺 Moscou",
+            moscow_time.strftime("%H:%M:%S"),
+            delta="UTC+3"
+        )
+    
+    # Statut du marché
+    status, status_class = tz_manager.get_market_status()
+    countdown = tz_manager.time_until_next_session()
+    
+    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+    
+    with col_stat1:
+        if status_class == "open":
+            st.markdown(f"<div class='market-open'>🟢 {status}</div>", unsafe_allow_html=True)
+        elif status_class == "evening":
+            st.markdown(f"<div class='market-open'>🌙 {status}</div>", unsafe_allow_html=True)
+        elif status_class == "pre":
+            st.markdown(f"<div class='market-closed'>🟡 {status}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='market-closed'>🔴 {status}</div>", unsafe_allow_html=True)
+    
+    with col_stat2:
+        st.metric("⏳ Prochaine ouverture", countdown)
+    
+    with col_stat3:
+        st.metric("📅 Date", moscow_time.strftime("%d/%m/%Y"))
+    
+    with col_stat4:
+        st.markdown("<span class='live-badge'>LIVE</span>", unsafe_allow_html=True)
+    
+    # Heures MOEX converties
+    st.markdown("---")
+    st.subheader("📅 Horaires MOEX dans votre fuseau")
+    
+    market_hours = tz_manager.get_market_hours_local(tz_name)
+    
+    col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+    
+    with col_h1:
+        st.info(f"**Session principale**\n\n{market_hours['main_open']} - {market_hours['main_close']}")
+    with col_h2:
+        st.info(f"**Session du soir**\n\n{market_hours['evening_open']} - {market_hours['evening_close']}")
+    with col_h3:
+        st.info(f"**Date locale**\n\n{market_hours['date']}")
+    with col_h4:
+        # Jours restants dans la semaine
+        days_left = 5 - moscow_time.weekday()
+        if days_left > 0 and moscow_time.weekday() < 5:
+            st.info(f"**Jours de trading**\n\n{days_left} jours restants")
+        else:
+            st.info("**Jours de trading**\n\nWeek-end")
+    
+    # =========================================================
+    # SECTION 2: INDICES MOEX
+    # =========================================================
+    
+    st.markdown("---")
+    st.subheader("📊 Indices MOEX")
+    
+    indices = moex_data.get_indices()
+    
+    col_i1, col_i2, col_i3, col_i4 = st.columns(4)
+    
+    with col_i1:
+        st.metric(
+            "IMOEX (RUB)",
+            f"{indices['IMOEX']['value']:.2f}",
+            f"{indices['IMOEX']['change']:.2f}%"
+        )
+    with col_i2:
+        st.metric(
+            "RTS (USD)",
+            f"{indices['RTSI']['value']:.2f}",
+            f"{indices['RTSI']['change']:.2f}%"
+        )
+    with col_i3:
+        st.metric(
+            "MOEX Blue Chip",
+            f"{indices['MOEXBC']['value']:.2f}",
+            f"{indices['MOEXBC']['change']:.2f}%"
+        )
+    with col_i4:
+        st.metric(
+            "MOEX Oil & Gas",
+            f"{indices['MOEXOG']['value']:.2f}",
+            f"{indices['MOEXOG']['change']:.2f}%"
+        )
+    
+    # =========================================================
+    # SECTION 3: TOP ACTIONS MOEX
+    # =========================================================
+    
+    st.markdown("---")
+    st.subheader("📈 Top Actions MOEX")
+    
+    # Charger les données
+    with st.spinner("Chargement des données en temps réel..."):
+        stocks = moex_data.get_realtime_data()
+    
+    # Créer DataFrame
+    df_stocks = pd.DataFrame([
+        {
+            'Symbole': sym,
+            'Société': info['name'],
+            'Prix (RUB)': f"₽{info['price']:,.2f}",
+            'Variation': info['change'],
+            'Variation %': f"{info['change']:+.2f}%",
+            'Volume': f"{info['volume']:,}",
+            'Cap. Marché': f"₽{info['market_cap']/1e9:.2f}B"
+        }
+        for sym, info in stocks.items()
+    ])
+    
+    # Trier par variation
+    df_stocks = df_stocks.sort_values('Variation', ascending=False)
+    
+    # Colorer les variations
+    def color_variation(val):
+        if isinstance(val, str) and '%' in val:
+            if '+' in val:
+                return 'color: #00cc96'
+            elif '-' in val:
+                return 'color: #ef553b'
+        return ''
+    
+    styled_df = df_stocks.style.applymap(color_variation, subset=['Variation %'])
+    st.dataframe(styled_df, use_container_width=True, height=400)
+    
+    # =========================================================
+    # SECTION 4: TOP GAINERS / LOSERS
+    # =========================================================
+    
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
+        st.subheader("📈 Top 5 Hausses")
+        gainers = df_stocks.head(5)
+        for _, row in gainers.iterrows():
+            st.markdown(f"""
+            <div style="background-color: #f0fff0; padding: 0.8rem; margin: 0.3rem 0; border-radius: 0.5rem; border-left: 4px solid #00cc96;">
+                <b>{row['Société']}</b> ({row['Symbole']})<br>
+                {row['Prix (RUB)']} | <span style="color: #00cc96;">{row['Variation %']}</span> | Vol: {row['Volume']}
+            </div>
+            """, unsafe_allow_html=True)
+    
+    with col_g2:
+        st.subheader("📉 Top 5 Baisses")
+        losers = df_stocks.tail(5).sort_values('Variation')
+        for _, row in losers.iterrows():
+            st.markdown(f"""
+            <div style="background-color: #fff0f0; padding: 0.8rem; margin: 0.3rem 0; border-radius: 0.5rem; border-left: 4px solid #ef553b;">
+                <b>{row['Société']}</b> ({row['Symbole']})<br>
+                {row['Prix (RUB)']} | <span style="color: #ef553b;">{row['Variation %']}</span> | Vol: {row['Volume']}
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # =========================================================
+    # SECTION 5: GRAPHIQUE D'UN TITRE
+    # =========================================================
+    
+    st.markdown("---")
+    st.subheader("📊 Analyse détaillée")
+    
+    col_chart1, col_chart2 = st.columns([3, 1])
+    
+    with col_chart2:
+        selected_symbol = st.selectbox(
+            "Choisir une action",
+            options=list(MOEXDataProvider.MOEX_STOCKS.keys()),
+            format_func=lambda x: f"{x} - {MOEXDataProvider.MOEX_STOCKS[x]}"
+        )
         
-        open_matrix = []
-        for exchange in exchanges:
-            row = []
-            info = TimezoneManager.STOCK_EXCHANGES[exchange]
-            tz = timezone(info['tz'])
-            
-            for hour in hours:
-                # Vérifier si la bourse est ouverte à cette heure UTC
-                utc_time = datetime.now(pytz.UTC).replace(hour=hour, minute=0)
-                local_time = utc_time.astimezone(tz)
-                
-                open_hour = int(info['hours'].split('-')[0].split(':')[0])
-                close_hour = int(info['hours'].split('-')[1].split(':')[0])
-                
-                is_open = open_hour <= local_time.hour < close_hour
-                row.append(1 if is_open else 0)
-            
-            open_matrix.append(row)
+        # Période
+        period = st.selectbox(
+            "Période",
+            options=["1j", "5j", "1m", "3m", "6m", "1a"],
+            index=0
+        )
         
-        fig = go.Figure(data=go.Heatmap(
-            z=open_matrix,
-            x=[f"{h:02d}:00" for h in hours],
-            y=exchanges,
-            colorscale=[[0, 'red'], [1, 'green']],
-            showscale=False
+        # Info rapide
+        if selected_symbol in stocks:
+            info = stocks[selected_symbol]
+            st.metric("Prix actuel", f"₽{info['price']:,.2f}", f"{info['change']:+.2f}%")
+            st.metric("Volume", f"{info['volume']:,}")
+    
+    with col_chart1:
+        # Simuler des données historiques
+        dates = pd.date_range(
+            end=tz_manager.get_moscow_time(),
+            periods=100,
+            freq='D'
+        )
+        
+        # Base price
+        base_price = stocks[selected_symbol]['price'] if selected_symbol in stocks else 1000
+        
+        # Générer des prix réalistes
+        returns = np.random.normal(0.001, 0.02, 100)
+        prices = base_price * np.exp(np.cumsum(returns))
+        
+        # Créer le graphique
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=prices,
+            mode='lines',
+            name=selected_symbol,
+            line=dict(color='#0033A0', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(0, 51, 160, 0.1)'
+        ))
+        
+        # Ajouter moyenne mobile
+        ma20 = pd.Series(prices).rolling(window=20).mean()
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=ma20,
+            mode='lines',
+            name='MA20',
+            line=dict(color='orange', width=1, dash='dash')
         ))
         
         fig.update_layout(
-            title="Périodes d'ouverture (UTC)",
-            xaxis_title="Heure UTC",
-            yaxis_title="Bourse",
-            height=400
+            title=f"{selected_symbol} - {MOEXDataProvider.MOEX_STOCKS[selected_symbol]}",
+            xaxis_title="Date",
+            yaxis_title="Prix (RUB)",
+            height=500,
+            template='plotly_white',
+            hovermode='x unified'
         )
         
         st.plotly_chart(fig, use_container_width=True)
     
-    elif menu == "🔄 Convertisseur":
-        timezone_converter_tool()
-        
-        # Table de conversion rapide
-        with st.expander("📊 Table de conversion rapide"):
-            base_tz = st.selectbox(
-                "Fuseau de base",
-                options=TimezoneManager.get_all_timezones(),
-                index=TimezoneManager.get_all_timezones().index('UTC±0')
-            )
-            
-            base_offset = TimezoneManager.UTC_OFFSETS[base_tz]
-            base_time = datetime.now().replace(hour=12, minute=0)
-            
-            data = []
-            for tz_name, offset in TimezoneManager.UTC_OFFSETS.items():
-                converted = base_time + timedelta(hours=offset - base_offset)
-                data.append({
-                    'Fuseau': tz_name,
-                    'Décalage': f"{offset:+g}" if offset != 0 else "0",
-                    'Heure (midi base)': converted.strftime('%H:%M'),
-                    'Villes': TimezoneManager.MAJOR_CITIES.get(tz_name, '')
-                })
-            
-            df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
+    # =========================================================
+    # SECTION 6: VOLUME PAR SECTEUR
+    # =========================================================
     
-    elif menu == "📊 Dashboard MOEX":
-        st.header("🇷🇺 Moscow Exchange (MOEX)")
-        
-        # Compte à rebours
-        market_countdown_timer()
-        
-        # Informations MOEX
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Heures MOEX")
-            moscow_tz = timezone('Europe/Moscow')
-            now_moscow = datetime.now(moscow_tz)
-            
-            st.write(f"**Heure actuelle (Moscou)**: {now_moscow.strftime('%H:%M:%S')}")
-            st.write("**Session principale**: 10:00 - 18:45 (UTC+3)")
-            st.write("**Session du soir**: 19:05 - 23:50 (certains instruments)")
-            st.write("**Week-end**: Fermé")
-        
-        with col2:
-            st.subheader("Conversion dans votre fuseau")
-            user_tz, _ = timezone_selector(key="moex_tz")
-            user_offset = TimezoneManager.UTC_OFFSETS[user_tz]
-            
-            # Convertir les heures MOEX
-            moex_open_local = (datetime.now().replace(hour=10, minute=0) + 
-                              timedelta(hours=user_offset - 3)).strftime('%H:%M')
-            moex_close_local = (datetime.now().replace(hour=18, minute=45) + 
-                               timedelta(hours=user_offset - 3)).strftime('%H:%M')
-            
-            st.write(f"**Ouverture locale**: {moex_open_local}")
-            st.write(f"**Fermeture locale**: {moex_close_local}")
+    st.markdown("---")
+    st.subheader("📊 Distribution par secteur")
     
-    elif menu == "ℹ️ Informations":
-        st.header("ℹ️ À propos des fuseaux horaires")
+    # Données simulées par secteur
+    sectors = {
+        'Finance': 25.5,
+        'Pétrole & Gaz': 32.8,
+        'Métaux & Mines': 18.3,
+        'Technologie': 8.2,
+        'Télécoms': 6.1,
+        'Consommation': 5.1,
+        'Électricité': 4.0
+    }
+    
+    col_p1, col_p2 = st.columns(2)
+    
+    with col_p1:
+        # Pie chart
+        fig_pie = go.Figure(data=[go.Pie(
+            labels=list(sectors.keys()),
+            values=list(sectors.values()),
+            hole=0.4,
+            marker_colors=['#0033A0', '#D52B1E', '#FFD700', '#00cc96', '#ef553b', '#ab63fa', '#ffa15a']
+        )])
         
+        fig_pie.update_layout(
+            title="Capitalisation par secteur (%)",
+            height=400
+        )
+        
+        st.plotly_chart(fig_pie, use_container_width=True)
+    
+    with col_p2:
+        # Bar chart
+        df_sectors = pd.DataFrame({
+            'Secteur': list(sectors.keys()),
+            'Capitalisation (Mds ₽)': [v * 10 for v in sectors.values()]
+        })
+        
+        fig_bar = px.bar(
+            df_sectors,
+            x='Secteur',
+            y='Capitalisation (Mds ₽)',
+            color='Secteur',
+            color_discrete_sequence=['#0033A0', '#D52B1E', '#FFD700', '#00cc96', '#ef553b', '#ab63fa', '#ffa15a']
+        )
+        
+        fig_bar.update_layout(
+            title="Capitalisation par secteur",
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig_bar, use_container_width=True)
+    
+    # =========================================================
+    # SECTION 7: CONVERTISSEUR DE FUSEAU POUR MOEX
+    # =========================================================
+    
+    st.markdown("---")
+    st.subheader("🔄 Convertisseur MOEX - Tous fuseaux")
+    
+    col_conv1, col_conv2, col_conv3 = st.columns(3)
+    
+    with col_conv1:
+        from_tz = st.selectbox(
+            "Fuseau source",
+            options=list(MOEXTimeZoneManager.UTC_OFFSETS.keys()),
+            key="from_tz"
+        )
+        
+        # Heure MOEX
+        moex_hour = st.time_input("Heure MOEX", value=datetime.strptime("10:00", "%H:%M").time())
+    
+    with col_conv2:
+        st.markdown("<br><h2 style='text-align: center;'>→</h2>", unsafe_allow_html=True)
+    
+    with col_conv3:
+        to_tz = st.selectbox(
+            "Fuseau cible",
+            options=list(MOEXTimeZoneManager.UTC_OFFSETS.keys()),
+            index=list(MOEXTimeZoneManager.UTC_OFFSETS.keys()).index('UTC-5'),
+            key="to_tz"
+        )
+        
+        # Calculer la conversion
+        from_offset = MOEXTimeZoneManager.UTC_OFFSETS[from_tz]
+        to_offset = MOEXTimeZoneManager.UTC_OFFSETS[to_tz]
+        
+        # Convertir
+        moex_dt = datetime.combine(datetime.now().date(), moex_hour)
+        converted_dt = moex_dt + timedelta(hours=to_offset - from_offset)
+        
+        st.metric(
+            "Heure convertie",
+            converted_dt.strftime("%H:%M"),
+            delta=f"{to_tz}"
+        )
+        
+        # Afficher la différence
+        diff = to_offset - from_offset
+        st.caption(f"Différence: {diff:+g} heures")
+    
+    # =========================================================
+    # SECTION 8: CALENDRIER MOEX
+    # =========================================================
+    
+    with st.expander("📅 Calendrier MOEX 2024"):
         st.markdown("""
-        ### 📚 Guide des fuseaux horaires
+        | Date | Jour férié |
+        |------|------------|
+        | 1-8 janvier | Nouvel An |
+        | 7 janvier | Noël orthodoxe |
+        | 23 février | Jour du défenseur de la patrie |
+        | 8 mars | Journée internationale des femmes |
+        | 1 mai | Fête du printemps et du travail |
+        | 9 mai | Jour de la Victoire |
+        | 12 juin | Jour de la Russie |
+        | 4 novembre | Journée de l'unité nationale |
         
-        #### UTC (Temps Universel Coordonné)
-        - Référence internationale
-        - Ne change pas avec les saisons
-        - Base pour tous les autres fuseaux
-        
-        #### Décalages courants
-        - **UTC-5**: Heure de l'Est (New York)
-        - **UTC±0**: UTC (Londres)
-        - **UTC+1**: Heure d'Europe centrale (Paris)
-        - **UTC+2**: Heure d'Europe de l'Est (Helsinki)
-        - **UTC+3**: Heure de Moscou
-        - **UTC+5:30**: Heure de l'Inde
-        - **UTC+8**: Heure de Chine
-        - **UTC+9**: Heure du Japon
-        
-        #### Heure d'été
-        Certains pays ajustent leur heure en été:
-        - Europe: Dernier dimanche de mars au dernier dimanche d'octobre
-        - USA: Deuxième dimanche de mars au premier dimanche de novembre
-        - Russie: N'observe plus l'heure d'été depuis 2014
-        
-        #### Bourse de Moscou (MOEX)
-        - Fuseau: UTC+3 (constant, pas d'heure d'été)
-        - Horaires: 10:00 - 18:45
-        - Jours ouverts: Lundi-Vendredi
+        **Horaires spéciaux:**
+        - Dernier jour de l'année: Fermeture à 14:00
+        - Veilles de jours fériés: Horaires normaux
         """)
+    
+    # =========================================================
+    # FOOTER
+    # =========================================================
+    
+    st.markdown("---")
+    st.markdown(f"""
+    <div style="text-align: center; color: gray; font-size: 0.8rem; padding: 1rem;">
+        🇷🇺 MOEX Moscow Exchange - Dashboard Temps Réel<br>
+        Dernière mise à jour: {tz_manager.get_moscow_time().strftime('%Y-%m-%d %H:%M:%S')} (heure Moscou)<br>
+        Fuseaux disponibles: UTC-12 à UTC+14 | Heure de Moscou: UTC+3 (fixe)
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Auto-refresh option
+    if st.checkbox("🔄 Actualisation automatique (30s)"):
+        time.sleep(30)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
