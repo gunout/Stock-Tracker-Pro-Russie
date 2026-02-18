@@ -1,185 +1,223 @@
 """
-Page de gestion du portefeuille virtuel
+Page Portefeuille - Version corrigée
 """
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from src.models.portfolio import Portfolio, Position
-from src.api.moex_client import MOEXClient
-from src.utils.formatters import format_currency, format_percentage
-from src.visualization.charts import create_allocation_chart
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from src.api.moex_client import MOEXClient
+    client = MOEXClient()
+    API_OK = True
+except Exception as e:
+    st.error(f"Erreur d'initialisation API: {e}")
+    API_OK = False
+
+# ==================== INITIALISATION DE SESSION ====================
+def init_session_state():
+    """Initialise toutes les variables de session nécessaires"""
+    
+    # Portefeuille - Vérifier si existe, sinon créer
+    if 'portfolio' not in st.session_state:
+        st.session_state.portfolio = {}
+    
+    # Watchlist - Liste par défaut si non existante
+    if 'watchlist' not in st.session_state:
+        st.session_state.watchlist = ['SBER', 'GAZP', 'LKOH', 'YNDX', 'ROSN', 'GMKN']
+    
+    # Positions - Structure pour stocker les achats
+    if 'positions' not in st.session_state:
+        st.session_state.positions = []
+
+# Appeler l'initialisation
+init_session_state()
+
+# ==================== FONCTIONS DU PORTEFEUILLE ====================
+
+def add_position(symbol, shares, buy_price, buy_date):
+    """Ajoute une position au portefeuille"""
+    position = {
+        'symbol': symbol,
+        'shares': shares,
+        'buy_price': buy_price,
+        'buy_date': buy_date.strftime('%Y-%m-%d'),
+        'total_cost': shares * buy_price
+    }
+    st.session_state.positions.append(position)
+    
+    # Mettre à jour le portfolio pour la compatibilité
+    if symbol not in st.session_state.portfolio:
+        st.session_state.portfolio[symbol] = []
+    st.session_state.portfolio[symbol].append(position)
+
+def remove_position(index):
+    """Supprime une position"""
+    if 0 <= index < len(st.session_state.positions):
+        removed = st.session_state.positions.pop(index)
+        # Nettoyer portfolio si nécessaire
+        symbol = removed['symbol']
+        if symbol in st.session_state.portfolio and st.session_state.portfolio[symbol]:
+            st.session_state.portfolio[symbol].pop()
+            if not st.session_state.portfolio[symbol]:
+                del st.session_state.portfolio[symbol]
+
+def calculate_portfolio_value():
+    """Calcule la valeur totale du portefeuille"""
+    total_value = 0
+    total_cost = 0
+    
+    for position in st.session_state.positions:
+        # Prix actuel (simulé pour l'instant)
+        current_price = get_mock_price(position['symbol'])
+        value = position['shares'] * current_price
+        total_value += value
+        total_cost += position['total_cost']
+    
+    return total_value, total_cost
+
+def get_mock_price(symbol):
+    """Prix simulé pour les tests"""
+    mock_prices = {
+        'SBER': 280.50,
+        'GAZP': 165.80,
+        'LKOH': 7200.50,
+        'YNDX': 2850.00,
+        'ROSN': 550.30,
+        'GMKN': 16500.00
+    }
+    return mock_prices.get(symbol, 100.00)
+
+def get_real_price(symbol):
+    """Tente d'obtenir le prix réel via API"""
+    try:
+        if API_OK and hasattr(client, 'get_market_data'):
+            data = client.get_market_data(symbol)
+            if data is not None and not data.empty and 'LAST' in data.columns:
+                return float(data['LAST'].iloc[0])
+    except:
+        pass
+    return get_mock_price(symbol)
+
+# ==================== INTERFACE PRINCIPALE ====================
 
 def show():
-    """Affiche la page du portefeuille"""
-    
     st.markdown("# 💰 Portefeuille virtuel")
     
-    # Initialisation du portefeuille
-    if 'portfolio' not in st.session_state:
-        st.session_state.portfolio = Portfolio()
-    
-    portfolio = st.session_state.portfolio
-    
     # Onglets
-    tab1, tab2, tab3 = st.tabs(["📊 Aperçu", "➕ Ajouter", "📈 Performance"])
+    tab1, tab2 = st.tabs(["📊 Aperçu", "➕ Ajouter une position"])
     
     with tab1:
-        col1, col2 = st.columns([2, 1])
-        
-        with col2:
-            st.markdown("### 📋 Actions rapides")
-            if st.button("🔄 Mettre à jour les prix", use_container_width=True):
-                st.rerun()
+        # Métriques du portefeuille
+        if st.session_state.positions:
+            total_value, total_cost = calculate_portfolio_value()
+            total_profit = total_value - total_cost
+            total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0
             
-            if st.button("📊 Exporter le rapport", use_container_width=True):
-                # Logique d'export
-                st.info("Fonctionnalité à venir")
-        
-        with col1:
-            if portfolio.positions:
-                # Récupérer les prix actuels
-                client = MOEXClient()
-                prices = {}
-                
-                with st.spinner("Mise à jour des prix..."):
-                    for symbol in portfolio.positions.keys():
-                        try:
-                            market_data = client.get_market_data(symbol)
-                            if not market_data.empty and 'LAST' in market_data.columns:
-                                prices[symbol] = market_data['LAST'].iloc[0]
-                            else:
-                                prices[symbol] = 0
-                        except:
-                            prices[symbol] = 0
-                
-                # Calcul des totaux
-                total_value = portfolio.get_current_value(prices)
-                total_cost = portfolio.get_total_cost()
-                total_profit = portfolio.get_profit_loss(prices)
-                total_profit_pct = portfolio.get_profit_loss_percent(prices)
-                
-                # Métriques du portefeuille
-                col_m1, col_m2, col_m3 = st.columns(3)
-                
-                with col_m1:
-                    st.metric(
-                        "Valeur totale",
-                        format_currency(total_value),
-                        delta=f"{format_currency(total_profit)}"
-                    )
-                
-                with col_m2:
-                    st.metric(
-                        "Coût total",
-                        format_currency(total_cost)
-                    )
-                
-                with col_m3:
-                    st.metric(
-                        "Performance",
-                        format_percentage(total_profit_pct)
-                    )
-                
-                st.markdown("---")
-                
-                # Tableau des positions
-                st.markdown("### 📋 Positions détaillées")
-                df_positions = portfolio.to_dataframe(prices)
-                st.dataframe(df_positions, use_container_width=True)
-                
-                # Graphique d'allocation
-                st.markdown("### 🥧 Allocation du portefeuille")
-                allocation = portfolio.get_allocation()
-                if allocation:
-                    fig = create_allocation_chart(allocation)
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                # Bouton pour vider
-                if st.button("🗑️ Vider le portefeuille", use_container_width=True):
-                    st.session_state.portfolio = Portfolio()
-                    st.rerun()
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Valeur totale", f"{total_value:,.2f} ₽")
+            with col2:
+                st.metric("Coût total", f"{total_cost:,.2f} ₽")
+            with col3:
+                delta_color = "normal" if total_profit >= 0 else "inverse"
+                st.metric(
+                    "Profit/Perte",
+                    f"{total_profit:+,.2f} ₽",
+                    delta=f"{total_profit_pct:+.1f}%",
+                    delta_color=delta_color
+                )
             
+            # Tableau des positions
+            st.subheader("📋 Positions actuelles")
+            
+            positions_data = []
+            for i, pos in enumerate(st.session_state.positions):
+                current_price = get_real_price(pos['symbol'])
+                current_value = pos['shares'] * current_price
+                profit = current_value - pos['total_cost']
+                profit_pct = (profit / pos['total_cost'] * 100) if pos['total_cost'] > 0 else 0
+                
+                positions_data.append({
+                    'Symbole': pos['symbol'],
+                    'Actions': pos['shares'],
+                    "Prix d'achat": f"{pos['buy_price']:,.2f} ₽",
+                    'Date achat': pos['buy_date'],
+                    'Prix actuel': f"{current_price:,.2f} ₽",
+                    'Valeur': f"{current_value:,.2f} ₽",
+                    'Profit': f"{profit:+,.2f} ₽",
+                    'Profit %': f"{profit_pct:+.1f}%",
+                    'Index': i
+                })
+            
+            if positions_data:
+                df = pd.DataFrame(positions_data)
+                st.dataframe(df.drop('Index', axis=1), use_container_width=True)
+                
+                # Boutons de suppression
+                st.subheader("🗑️ Supprimer une position")
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    position_to_delete = st.selectbox(
+                        "Choisir une position à supprimer",
+                        options=range(len(positions_data)),
+                        format_func=lambda x: f"{positions_data[x]['Symbole']} - {positions_data[x]['Date achat']}"
+                    )
+                with col2:
+                    if st.button("Supprimer", use_container_width=True):
+                        remove_position(position_to_delete)
+                        st.rerun()
             else:
-                st.info("Aucune position dans le portefeuille. Utilisez l'onglet 'Ajouter' pour commencer.")
+                st.info("Aucune position dans le portefeuille")
+        else:
+            st.info("Aucune position dans le portefeuille. Utilisez l'onglet 'Ajouter' pour commencer.")
     
     with tab2:
-        st.markdown("### ➕ Ajouter une nouvelle position")
+        st.subheader("➕ Ajouter une nouvelle position")
         
         with st.form("add_position_form"):
-            # Récupérer la liste des actions
-            client = MOEXClient()
-            try:
-                securities_df = client.get_securities()
-                if not securities_df.empty:
-                    ticker_options = securities_df['SECID'].tolist()
-                    selected_ticker = st.selectbox(
-                        "Symbole",
-                        options=ticker_options,
-                        index=0 if ticker_options else 0
-                    )
-                else:
-                    selected_ticker = st.selectbox(
-                        "Symbole",
-                        options=st.session_state.watchlist,
-                        index=0
-                    )
-            except:
-                selected_ticker = st.selectbox(
-                    "Symbole",
-                    options=st.session_state.watchlist,
-                    index=0
-                )
+            # Utiliser la watchlist initialisée
+            symbol_options = st.session_state.watchlist + ["Autre..."]
+            symbol_choice = st.selectbox("Symbole", options=symbol_options)
+            
+            if symbol_choice == "Autre...":
+                symbol = st.text_input("Entrez le symbole", value="").upper()
+            else:
+                symbol = symbol_choice
             
             col1, col2 = st.columns(2)
-            
             with col1:
-                shares = st.number_input(
-                    "Nombre d'actions",
-                    min_value=1,
-                    value=100,
-                    step=10
-                )
-                
-                buy_price = st.number_input(
-                    "Prix d'achat (₽)",
-                    min_value=0.01,
-                    value=100.0,
-                    step=10.0
-                )
+                shares = st.number_input("Nombre d'actions", min_value=1, value=10, step=1)
+                buy_price = st.number_input("Prix d'achat (₽)", min_value=0.01, value=100.0, step=10.0)
             
             with col2:
-                buy_date = st.date_input(
-                    "Date d'achat",
-                    value=datetime.now()
-                )
-                
-                notes = st.text_area(
-                    "Notes (optionnel)",
-                    max_chars=200
-                )
+                buy_date = st.date_input("Date d'achat", value=datetime.now())
+                notes = st.text_area("Notes (optionnel)", max_chars=200)
             
             submitted = st.form_submit_button("✅ Ajouter au portefeuille")
             
-            if submitted:
-                position = Position(
-                    symbol=selected_ticker,
-                    shares=shares,
-                    buy_price=buy_price,
-                    buy_date=datetime.combine(buy_date, datetime.min.time()),
-                    notes=notes if notes else None
-                )
-                
-                portfolio.add_position(position)
-                st.success(f"✅ {shares} actions {selected_ticker} ajoutées au portefeuille")
+            if submitted and symbol:
+                add_position(symbol, shares, buy_price, buy_date)
+                st.success(f"✅ {shares} actions {symbol} ajoutées au portefeuille")
                 st.rerun()
     
-    with tab3:
-        st.markdown("### 📈 Analyse de performance")
-        st.info("Fonctionnalité en cours de développement")
+    # Actions rapides dans la sidebar
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 📋 Actions rapides")
         
-        if portfolio.positions:
-            st.markdown("**Statistiques à venir :**")
-            st.markdown("- Courbe de performance")
-            st.markdown("- Comparaison avec indices")
-            st.markdown("- Ratios de risque (Sharpe, Sortino)")
-            st.markdown("- Drawdown maximum")
+        if st.button("📊 Vider le portefeuille", use_container_width=True):
+            st.session_state.positions = []
+            st.session_state.portfolio = {}
+            st.rerun()
+        
+        if st.button("🔄 Réinitialiser la watchlist", use_container_width=True):
+            st.session_state.watchlist = ['SBER', 'GAZP', 'LKOH', 'YNDX', 'ROSN', 'GMKN']
+            st.rerun()
+        
+        st.markdown("### 📈 Statistiques")
+        st.caption(f"Positions: {len(st.session_state.positions)}")
+        st.caption(f"Watchlist: {len(st.session_state.watchlist)} symboles")
